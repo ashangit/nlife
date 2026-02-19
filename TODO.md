@@ -23,10 +23,6 @@ highest to lowest impact / easiest to hardest.
   parallel with `rayon::par_iter`. Straightforward because each output cell depends
   only on input cells (no write-after-read hazard with double-buffering).
 
-- [ ] **Skip rendering off-screen cells** — `paint_cells` currently iterates the entire
-  grid. Compute the visible row/column range from `scroll_offset` and `viewport_rect`
-  and only paint those cells.
-
 - [ ] **GPU rendering with `egui_wgpu`** — upload the cell grid as a texture (one pixel
   per cell, alive = white, dead = black) and draw a full-screen quad with a fragment
   shader. Completely removes per-cell CPU draw calls.

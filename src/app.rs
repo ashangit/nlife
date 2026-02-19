@@ -279,8 +279,8 @@ impl GameOfLifeApp {
         // Paint background
         painter.rect_filled(response.rect, 0.0, COLOR_BG);
 
-        // Paint cells
-        self.paint_cells(&painter, origin);
+        // Paint cells (only those inside the visible viewport)
+        self.paint_cells(&painter, origin, self.viewport_rect);
     }
 
     /// Converts a canvas position to `(row, col)` grid coordinates, returning `None`
@@ -339,14 +339,28 @@ impl GameOfLifeApp {
         }
     }
 
-    /// Renders every cell of the grid to the painter using the alive/dead colours.
-    fn paint_cells(&self, painter: &Painter, origin: Pos2) {
+    /// Renders only the cells that intersect `viewport` to the painter.
+    ///
+    /// Computes the visible row/column range from the viewport rectangle and the
+    /// canvas `origin` so that off-screen cells are never submitted to the painter,
+    /// reducing CPU draw-call cost proportionally to the zoom level.
+    ///
+    /// # Arguments
+    /// * `painter`  — egui painter for the grid canvas
+    /// * `origin`   — screen-space top-left corner of the grid canvas
+    /// * `viewport` — screen-space rectangle of the visible scroll-area window
+    fn paint_cells(&self, painter: &Painter, origin: Pos2, viewport: egui::Rect) {
         let s = self.cell_size;
-        let gap = 1.0_f32;
-        let fill_size = s - gap;
+        let fill_size = s - 1.0;
 
-        for row in 0..self.grid.height {
-            for col in 0..self.grid.width {
+        // Project viewport edges into grid coordinates to find the visible range.
+        let col_min = ((viewport.min.x - origin.x) / s).floor().max(0.0) as usize;
+        let col_max = (((viewport.max.x - origin.x) / s).ceil() as usize).min(self.grid.width);
+        let row_min = ((viewport.min.y - origin.y) / s).floor().max(0.0) as usize;
+        let row_max = (((viewport.max.y - origin.y) / s).ceil() as usize).min(self.grid.height);
+
+        for row in row_min..row_max {
+            for col in col_min..col_max {
                 let x = origin.x + col as f32 * s;
                 let y = origin.y + row as f32 * s;
                 let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(fill_size));
