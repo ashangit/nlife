@@ -1,0 +1,13 @@
+[package]
+name    = "newlife"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+eframe = { version = "0.31", default-features = false, features = [
+    "default_fonts", "wgpu", "wayland",
+] }
+egui = "0.31"
+
+[profile.release]
+opt-level = 3
