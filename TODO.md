@@ -15,10 +15,6 @@ highest to lowest impact / easiest to hardest.
   changed last step. Restrict the next step and the painter to that region instead of
   scanning the full grid.
 
-- [ ] **Parallel stepping with Rayon** — partition rows into chunks and process them in
-  parallel with `rayon::par_iter`. Straightforward because each output cell depends
-  only on input cells (no write-after-read hazard with double-buffering).
-
 - [ ] **GPU rendering with `egui_wgpu`** — upload the cell grid as a texture (one pixel
   per cell, alive = white, dead = black) and draw a full-screen quad with a fragment
   shader. Completely removes per-cell CPU draw calls.

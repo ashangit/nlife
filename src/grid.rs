@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 use crate::patterns::{pattern_cells, Pattern};
 
 /// A 2-D grid of cells for Conway's Game of Life with dead-cell boundaries.
@@ -78,20 +80,23 @@ impl Grid {
     /// Out-of-bounds neighbours are treated as dead (finite, non-wrapping boundary).
     ///
     /// Uses a pre-allocated `next` scratch buffer — no heap allocation occurs per step.
-    /// After computing the new state, `cells` and `next` are swapped with a pointer flip.
+    /// The new generation is computed in parallel across all cells using Rayon, then
+    /// `cells` and `next` are swapped with a pointer flip.
     pub fn step(&mut self) {
         let width = self.width;
         let height = self.height;
-        // Borrow cells immutably and next mutably at the same time via field splitting.
+        // Split borrows: `cells` is read-only, `next` is write-only — no data race.
         let cells = &self.cells;
-        for row in 0..height {
-            for col in 0..width {
+        self.next
+            .par_iter_mut()
+            .enumerate()
+            .for_each(|(idx, cell)| {
+                let row = idx / width;
+                let col = idx % width;
                 let n = count_neighbors(cells, width, height, row, col);
-                let alive = cells[row * width + col];
-                self.next[row * width + col] =
-                    matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
-            }
-        }
+                let alive = cells[idx];
+                *cell = matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
+            });
         std::mem::swap(&mut self.cells, &mut self.next);
     }
 
