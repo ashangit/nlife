@@ -4,12 +4,19 @@ use crate::patterns::{pattern_cells, Pattern};
 ///
 /// Cells are stored in a flat `Vec<bool>` in row-major order:
 /// `index = row * width + col`.
+///
+/// A pre-allocated `next` buffer of the same size is kept alongside `cells`
+/// so that `step` can write the next generation into it and then swap the
+/// two buffers with a pointer-flip — avoiding a heap allocation every step.
 pub struct Grid {
     /// Number of columns.
     pub width: usize,
     /// Number of rows.
     pub height: usize,
+    /// Current generation cell states (read during step).
     cells: Vec<bool>,
+    /// Scratch buffer for the next generation (written during step, then swapped).
+    next: Vec<bool>,
 }
 
 impl Grid {
@@ -19,10 +26,12 @@ impl Grid {
     /// * `width`  — number of columns
     /// * `height` — number of rows
     pub fn new(width: usize, height: usize) -> Self {
+        let n = width * height;
         Self {
             width,
             height,
-            cells: vec![false; width * height],
+            cells: vec![false; n],
+            next: vec![false; n],
         }
     }
 
@@ -58,6 +67,7 @@ impl Grid {
     /// Sets every cell to dead.
     pub fn clear(&mut self) {
         self.cells.fill(false);
+        self.next.fill(false);
     }
 
     /// Advances the simulation by one generation using Conway's rules:
@@ -66,17 +76,23 @@ impl Grid {
     /// - All other cells die or stay dead.
     ///
     /// Out-of-bounds neighbours are treated as dead (finite, non-wrapping boundary).
+    ///
+    /// Uses a pre-allocated `next` scratch buffer — no heap allocation occurs per step.
+    /// After computing the new state, `cells` and `next` are swapped with a pointer flip.
     pub fn step(&mut self) {
-        let mut next = vec![false; self.width * self.height];
-        for row in 0..self.height {
-            for col in 0..self.width {
-                let n = self.count_live_neighbors(row, col);
-                let alive = self.cells[row * self.width + col];
-                next[row * self.width + col] =
+        let width = self.width;
+        let height = self.height;
+        // Borrow cells immutably and next mutably at the same time via field splitting.
+        let cells = &self.cells;
+        for row in 0..height {
+            for col in 0..width {
+                let n = count_neighbors(cells, width, height, row, col);
+                let alive = cells[row * width + col];
+                self.next[row * width + col] =
                     matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
             }
         }
-        self.cells = next;
+        std::mem::swap(&mut self.cells, &mut self.next);
     }
 
     /// Clears the grid and places `pattern` centred at `(height/2, width/2)`.
@@ -96,31 +112,6 @@ impl Grid {
                 self.set(r as usize, c as usize, true);
             }
         }
-    }
-
-    /// Returns the number of live neighbours of `(row, col)`.
-    ///
-    /// Out-of-bounds neighbours are treated as dead (dead-cell / finite boundary).
-    fn count_live_neighbors(&self, row: usize, col: usize) -> u8 {
-        let mut count = 0u8;
-        for dr in [-1i32, 0, 1] {
-            for dc in [-1i32, 0, 1] {
-                if dr == 0 && dc == 0 {
-                    continue;
-                }
-                let r = row as i32 + dr;
-                let c = col as i32 + dc;
-                if r >= 0
-                    && c >= 0
-                    && (r as usize) < self.height
-                    && (c as usize) < self.width
-                    && self.cells[r as usize * self.width + c as usize]
-                {
-                    count += 1;
-                }
-            }
-        }
-        count
     }
 
     /// Checks all four edges for live cells and, for each edge that has one, adds
@@ -146,7 +137,8 @@ impl Grid {
 
         let new_w = self.width + add_left + add_right;
         let new_h = self.height + add_top + add_bottom;
-        let mut new_cells = vec![false; new_w * new_h];
+        let n = new_w * new_h;
+        let mut new_cells = vec![false; n];
         for row in 0..self.height {
             for col in 0..self.width {
                 new_cells[(row + add_top) * new_w + (col + add_left)] =
@@ -156,8 +148,48 @@ impl Grid {
         self.width = new_w;
         self.height = new_h;
         self.cells = new_cells;
+        self.next = vec![false; n]; // resize scratch buffer to match
         (add_top, add_left)
     }
+}
+
+/// Counts live neighbours of cell `(row, col)` in a flat boolean slice.
+///
+/// Out-of-bounds neighbours are treated as dead (finite, non-wrapping boundary).
+/// Extracted as a free function so it can be called with split borrows and
+/// from parallel iterators without borrowing the whole `Grid`.
+///
+/// # Arguments
+/// * `cells`  — flat row-major cell buffer
+/// * `width`  — grid width in columns
+/// * `height` — grid height in rows
+/// * `row`, `col` — cell to evaluate
+pub(crate) fn count_neighbors(
+    cells: &[bool],
+    width: usize,
+    height: usize,
+    row: usize,
+    col: usize,
+) -> u8 {
+    let mut count = 0u8;
+    for dr in [-1i32, 0, 1] {
+        for dc in [-1i32, 0, 1] {
+            if dr == 0 && dc == 0 {
+                continue;
+            }
+            let r = row as i32 + dr;
+            let c = col as i32 + dc;
+            if r >= 0
+                && c >= 0
+                && (r as usize) < height
+                && (c as usize) < width
+                && cells[r as usize * width + c as usize]
+            {
+                count += 1;
+            }
+        }
+    }
+    count
 }
 
 #[cfg(test)]
