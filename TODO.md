@@ -7,10 +7,6 @@ highest to lowest impact / easiest to hardest.
 
 ## 1. Performance — CPU / Memory
 
-- [ ] **GPU rendering with `egui_wgpu`** — upload the cell grid as a texture (one pixel
-  per cell, alive = white, dead = black) and draw a full-screen quad with a fragment
-  shader. Completely removes per-cell CPU draw calls.
-
 ---
 
 ## 2. Faster Generation Computing
