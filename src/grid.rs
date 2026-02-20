@@ -2,11 +2,47 @@ use rayon::prelude::*;
 
 use crate::patterns::{pattern_cells, Pattern};
 
+// ── Bit-manipulation helpers ──────────────────────────────────────────────────
+
+/// Returns `true` if the bit at `(row, col)` is set in the bit-packed slice.
+///
+/// # Arguments
+/// * `cells`         — flat bit-packed row-major buffer (`u64` words)
+/// * `words_per_row` — number of `u64` words per row
+/// * `row`, `col`    — cell coordinates
+#[inline]
+fn get_bit(cells: &[u64], words_per_row: usize, row: usize, col: usize) -> bool {
+    (cells[row * words_per_row + col / 64] >> (col % 64)) & 1 != 0
+}
+
+/// Sets or clears the bit at `(row, col)` in the bit-packed slice.
+///
+/// # Arguments
+/// * `cells`         — flat bit-packed row-major buffer (mutable)
+/// * `words_per_row` — number of `u64` words per row
+/// * `row`, `col`    — cell coordinates
+/// * `alive`         — `true` to set the bit, `false` to clear it
+#[inline]
+fn set_bit(cells: &mut [u64], words_per_row: usize, row: usize, col: usize, alive: bool) {
+    let idx = row * words_per_row + col / 64;
+    let bit = col % 64;
+    if alive {
+        cells[idx] |= 1u64 << bit;
+    } else {
+        cells[idx] &= !(1u64 << bit);
+    }
+}
+
 /// A 2-D grid of cells for Conway's Game of Life with dead-cell boundaries.
 ///
 /// ## Storage layout
-/// Cells are stored in a flat `Vec<bool>` in row-major order:
-/// `index = row * width + col`.
+/// Cells are stored in a flat bit-packed `Vec<u64>` in row-major order.
+/// Each row occupies `words_per_row = ⌈width / 64⌉` words.
+/// Within each word, bit `col % 64` corresponds to column `col`
+/// (LSB = leftmost column of the word group).  Unused high bits in the
+/// last word of each row are always zero.
+///
+/// This packs 64 cells per 8 bytes — an 8× reduction over `Vec<bool>`.
 ///
 /// ## Double-buffer
 /// A pre-allocated `next` scratch buffer of the same size avoids heap
@@ -24,10 +60,12 @@ pub struct Grid {
     pub width: usize,
     /// Number of rows.
     pub height: usize,
-    /// Current generation cell states (read during step).
-    cells: Vec<bool>,
+    /// Number of `u64` words per row: `⌈width / 64⌉`.
+    words_per_row: usize,
+    /// Current generation cell states (read during step), bit-packed.
+    cells: Vec<u64>,
     /// Scratch buffer for the next generation (written during step, then swapped).
-    next: Vec<bool>,
+    next: Vec<u64>,
     /// Tight bounding box of live cells: `[row_min, col_min, row_max, col_max]`
     /// (all inclusive).  `None` when the grid is empty.
     pub live_bbox: Option<[usize; 4]>,
@@ -43,12 +81,14 @@ impl Grid {
     /// * `width`  — number of columns
     /// * `height` — number of rows
     pub fn new(width: usize, height: usize) -> Self {
-        let n = width * height;
+        let words_per_row = width.div_ceil(64);
+        let n = height * words_per_row;
         Self {
             width,
             height,
-            cells: vec![false; n],
-            next: vec![false; n],
+            words_per_row,
+            cells: vec![0u64; n],
+            next: vec![0u64; n],
             live_bbox: None,
             active_region: None,
         }
@@ -61,7 +101,7 @@ impl Grid {
         if row >= self.height || col >= self.width {
             return false;
         }
-        self.cells[row * self.width + col]
+        get_bit(&self.cells, self.words_per_row, row, col)
     }
 
     /// Sets the alive/dead state of the cell at `(row, col)`.
@@ -70,7 +110,7 @@ impl Grid {
     /// When `alive` is `true`, expands `live_bbox` to include the cell.
     pub fn set(&mut self, row: usize, col: usize, alive: bool) {
         if row < self.height && col < self.width {
-            self.cells[row * self.width + col] = alive;
+            set_bit(&mut self.cells, self.words_per_row, row, col, alive);
             if alive {
                 self.include_in_bbox(row, col);
             }
@@ -84,9 +124,11 @@ impl Grid {
     /// when the cell dies — the bbox is conservative).
     pub fn toggle(&mut self, row: usize, col: usize) {
         if row < self.height && col < self.width {
-            let idx = row * self.width + col;
-            let new_alive = !self.cells[idx];
-            self.cells[idx] = new_alive;
+            let wpr = self.words_per_row;
+            let idx = row * wpr + col / 64;
+            let bit = col % 64;
+            self.cells[idx] ^= 1u64 << bit;
+            let new_alive = (self.cells[idx] >> bit) & 1 != 0;
             if new_alive {
                 self.include_in_bbox(row, col);
             }
@@ -95,8 +137,8 @@ impl Grid {
 
     /// Sets every cell to dead and resets both buffers and bounding box.
     pub fn clear(&mut self) {
-        self.cells.fill(false);
-        self.next.fill(false);
+        self.cells.fill(0);
+        self.next.fill(0);
         self.live_bbox = None;
         self.active_region = None;
     }
@@ -110,11 +152,13 @@ impl Grid {
     ///
     /// ## Optimisations
     /// - **Dirty rectangle**: only cells within `live_bbox ± 1` are evaluated.
+    /// - **Bit-packed storage**: 8× less memory; improved cache utilisation.
     /// - **Double-buffer**: writes to `next` and swaps — no heap allocation.
     /// - **Rayon parallelism**: the active rows are processed in parallel.
     pub fn step(&mut self) {
         let width = self.width;
         let height = self.height;
+        let wpr = self.words_per_row;
 
         // Early exit when the grid is empty — nothing can change.
         let Some([rmin, cmin, rmax, cmax]) = self.live_bbox else {
@@ -128,26 +172,36 @@ impl Grid {
         let c1 = (cmax + 1).min(width - 1);
 
         // Zero stale values from the previous active region in `next`.
-        // Cells outside the new active region must be false before the swap.
+        // We zero whole words for the affected column range — safe because bits
+        // outside the old active_region column range were never written to `next`.
         if let Some([or0, oc0, or1, oc1]) = self.active_region {
-            self.next[or0 * width..(or1 + 1) * width]
-                .par_chunks_mut(width)
-                .for_each(|row_slice| {
-                    row_slice[oc0..=oc1].fill(false);
+            let ow0 = oc0 / 64;
+            let ow1 = oc1 / 64;
+            self.next[or0 * wpr..(or1 + 1) * wpr]
+                .par_chunks_mut(wpr)
+                .for_each(|row_words| {
+                    row_words[ow0..=ow1].fill(0);
                 });
         }
 
         // Compute the next generation in the active region (parallel over rows).
         let cells = &self.cells;
-        self.next[r0 * width..(r1 + 1) * width]
-            .par_chunks_mut(width)
+        self.next[r0 * wpr..(r1 + 1) * wpr]
+            .par_chunks_mut(wpr)
             .enumerate()
-            .for_each(|(i, row_slice)| {
+            .for_each(|(i, row_words)| {
                 let row = r0 + i;
                 for col in c0..=c1 {
-                    let n = count_neighbors(cells, width, height, row, col);
-                    let alive = cells[row * width + col];
-                    row_slice[col] = matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
+                    let n = count_neighbors(cells, wpr, width, height, row, col);
+                    let alive = get_bit(cells, wpr, row, col);
+                    let new_alive = matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
+                    let widx = col / 64;
+                    let bit = col % 64;
+                    if new_alive {
+                        row_words[widx] |= 1u64 << bit;
+                    } else {
+                        row_words[widx] &= !(1u64 << bit);
+                    }
                 }
             });
 
@@ -202,18 +256,21 @@ impl Grid {
 
         let new_w = self.width + add_left + add_right;
         let new_h = self.height + add_top + add_bottom;
-        let n = new_w * new_h;
-        let mut new_cells = vec![false; n];
+        let new_wpr = new_w.div_ceil(64);
+        let n = new_h * new_wpr;
+        let mut new_cells = vec![0u64; n];
         for row in 0..self.height {
             for col in 0..self.width {
-                new_cells[(row + add_top) * new_w + (col + add_left)] =
-                    self.cells[row * self.width + col];
+                if get_bit(&self.cells, self.words_per_row, row, col) {
+                    set_bit(&mut new_cells, new_wpr, row + add_top, col + add_left, true);
+                }
             }
         }
         self.width = new_w;
         self.height = new_h;
+        self.words_per_row = new_wpr;
         self.cells = new_cells;
-        self.next = vec![false; n]; // resize scratch buffer to match
+        self.next = vec![0u64; n]; // resize scratch buffer to match
 
         // Shift bbox and active_region to account for the new top/left padding.
         fn shift(bbox: [usize; 4], dr: usize, dc: usize) -> [usize; 4] {
@@ -244,6 +301,7 @@ impl Grid {
     /// * `r0`, `c0` — inclusive start of scan region (rows, cols)
     /// * `r1`, `c1` — inclusive end of scan region (rows, cols)
     fn scan_live_bbox(&self, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<[usize; 4]> {
+        let wpr = self.words_per_row;
         let mut rmin = usize::MAX;
         let mut cmin = usize::MAX;
         let mut rmax = 0usize;
@@ -251,7 +309,7 @@ impl Grid {
         let mut any = false;
         for row in r0..=r1 {
             for col in c0..=c1 {
-                if self.cells[row * self.width + col] {
+                if get_bit(&self.cells, wpr, row, col) {
                     any = true;
                     rmin = rmin.min(row);
                     cmin = cmin.min(col);
@@ -268,19 +326,21 @@ impl Grid {
     }
 }
 
-/// Counts live neighbours of cell `(row, col)` in a flat boolean slice.
+/// Counts live neighbours of cell `(row, col)` in a flat bit-packed slice.
 ///
 /// Out-of-bounds neighbours are treated as dead (finite, non-wrapping boundary).
 /// Extracted as a free function so it can be called with split borrows and
 /// from parallel iterators without borrowing the whole `Grid`.
 ///
 /// # Arguments
-/// * `cells`  — flat row-major cell buffer
-/// * `width`  — grid width in columns
-/// * `height` — grid height in rows
-/// * `row`, `col` — cell to evaluate
+/// * `cells`         — flat bit-packed row-major buffer (`u64` words)
+/// * `words_per_row` — number of `u64` words per row
+/// * `width`         — grid width in columns
+/// * `height`        — grid height in rows
+/// * `row`, `col`    — cell to evaluate
 pub(crate) fn count_neighbors(
-    cells: &[bool],
+    cells: &[u64],
+    words_per_row: usize,
     width: usize,
     height: usize,
     row: usize,
@@ -294,13 +354,8 @@ pub(crate) fn count_neighbors(
             }
             let r = row as i32 + dr;
             let c = col as i32 + dc;
-            if r >= 0
-                && c >= 0
-                && (r as usize) < height
-                && (c as usize) < width
-                && cells[r as usize * width + c as usize]
-            {
-                count += 1;
+            if r >= 0 && c >= 0 && (r as usize) < height && (c as usize) < width {
+                count += get_bit(cells, words_per_row, r as usize, c as usize) as u8;
             }
         }
     }
@@ -397,7 +452,7 @@ mod tests {
         assert_eq!(g.width, 20);
         assert_eq!(g.height, 20);
 
-        // A live cell on the top row → expand at top and left.
+        // A live cell on the top row → expand at top.
         let mut g2 = make_grid(20, 20, &[(0, 10)]);
         let (t2, l2) = g2.expand_if_needed();
         assert_eq!(t2, 20); // MARGIN = 20 rows added at top
@@ -478,26 +533,65 @@ mod tests {
     }
 
     #[test]
+    fn test_bit_packing_roundtrip() {
+        // Verify get/set correctness at word boundaries (col 63 and col 64).
+        let mut g = Grid::new(130, 4);
+        g.set(0, 63, true); // last bit of word 0
+        g.set(0, 64, true); // first bit of word 1
+        g.set(1, 0, true);
+        g.set(1, 127, true);
+
+        assert!(g.get(0, 63));
+        assert!(g.get(0, 64));
+        assert!(!g.get(0, 62));
+        assert!(!g.get(0, 65));
+        assert!(g.get(1, 0));
+        assert!(g.get(1, 127));
+        assert!(!g.get(1, 1));
+        assert!(!g.get(1, 126));
+    }
+
+    #[test]
     fn test_dirty_rect_step_correctness() {
-        // Run a 100-step glider and verify results match a brute-force reference.
-        // This catches any dirty-rect over/under-counting bugs.
-        let live = &[(10, 11), (11, 12), (12, 10), (12, 11), (12, 12)];
+        // Run a 50-step glider and verify results match a brute-force reference.
+        // This catches any dirty-rect or bit-packing bugs.
+        let live: &[(usize, usize)] = &[(10, 11), (11, 12), (12, 10), (12, 11), (12, 12)];
         let mut optimised = make_grid(60, 60, live);
         let mut reference = make_grid(60, 60, live);
 
-        // Step reference using full-grid scan (temporarily bypass dirty-rect).
         for _ in 0..50 {
             optimised.step();
-            // Reference step: brute-force full scan
+            // Reference step: brute-force full scan using only public API + snapshot.
             let w = reference.width;
             let h = reference.height;
-            let cells_snap = reference.cells.clone();
+            // Snapshot into a plain Vec<bool> so we read the old state while writing new.
+            let mut snapshot = Vec::with_capacity(w * h);
+            for r in 0..h {
+                for c in 0..w {
+                    snapshot.push(reference.get(r, c));
+                }
+            }
             for row in 0..h {
                 for col in 0..w {
-                    let n = count_neighbors(&cells_snap, w, h, row, col);
-                    let alive = cells_snap[row * w + col];
-                    reference.cells[row * w + col] =
-                        matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
+                    let mut n = 0u8;
+                    for dr in [-1i32, 0, 1] {
+                        for dc in [-1i32, 0, 1] {
+                            if dr == 0 && dc == 0 {
+                                continue;
+                            }
+                            let r = row as i32 + dr;
+                            let c = col as i32 + dc;
+                            if r >= 0 && c >= 0 && (r as usize) < h && (c as usize) < w {
+                                n += snapshot[r as usize * w + c as usize] as u8;
+                            }
+                        }
+                    }
+                    let alive = snapshot[row * w + col];
+                    reference.set(
+                        row,
+                        col,
+                        matches!((alive, n), (true, 2) | (true, 3) | (false, 3)),
+                    );
                 }
             }
             reference.live_bbox = reference.scan_live_bbox(0, 0, h - 1, w - 1);
@@ -506,7 +600,7 @@ mod tests {
         assert_eq!(
             live_cells(&optimised),
             live_cells(&reference),
-            "dirty-rect and brute-force states diverged after 50 steps"
+            "bit-packed dirty-rect and brute-force states diverged after 50 steps"
         );
     }
 }
