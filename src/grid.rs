@@ -4,12 +4,21 @@ use crate::patterns::{pattern_cells, Pattern};
 
 /// A 2-D grid of cells for Conway's Game of Life with dead-cell boundaries.
 ///
+/// ## Storage layout
 /// Cells are stored in a flat `Vec<bool>` in row-major order:
 /// `index = row * width + col`.
 ///
-/// A pre-allocated `next` buffer of the same size is kept alongside `cells`
-/// so that `step` can write the next generation into it and then swap the
-/// two buffers with a pointer-flip — avoiding a heap allocation every step.
+/// ## Double-buffer
+/// A pre-allocated `next` scratch buffer of the same size avoids heap
+/// allocation on every step.  After computing the new generation into `next`,
+/// the two buffers are swapped with a pointer flip.
+///
+/// ## Dirty-rectangle tracking
+/// `live_bbox` records the tight bounding box of all currently live cells.
+/// Each step only evaluates cells inside `live_bbox` expanded by one on each
+/// side — the only region where births or deaths can occur.  `active_region`
+/// tracks which region of `next` was written during the previous step so that
+/// stale values can be zeroed before the next step begins.
 pub struct Grid {
     /// Number of columns.
     pub width: usize,
@@ -19,6 +28,12 @@ pub struct Grid {
     cells: Vec<bool>,
     /// Scratch buffer for the next generation (written during step, then swapped).
     next: Vec<bool>,
+    /// Tight bounding box of live cells: `[row_min, col_min, row_max, col_max]`
+    /// (all inclusive).  `None` when the grid is empty.
+    pub live_bbox: Option<[usize; 4]>,
+    /// The expanded bounding box used in the most recent step.
+    /// Kept so we can zero stale values in `next` at the start of the next step.
+    active_region: Option<[usize; 4]>,
 }
 
 impl Grid {
@@ -34,6 +49,8 @@ impl Grid {
             height,
             cells: vec![false; n],
             next: vec![false; n],
+            live_bbox: None,
+            active_region: None,
         }
     }
 
@@ -50,26 +67,38 @@ impl Grid {
     /// Sets the alive/dead state of the cell at `(row, col)`.
     ///
     /// Does nothing for out-of-bounds coordinates.
+    /// When `alive` is `true`, expands `live_bbox` to include the cell.
     pub fn set(&mut self, row: usize, col: usize, alive: bool) {
         if row < self.height && col < self.width {
             self.cells[row * self.width + col] = alive;
+            if alive {
+                self.include_in_bbox(row, col);
+            }
         }
     }
 
     /// Toggles the alive/dead state of the cell at `(row, col)`.
     ///
     /// Does nothing for out-of-bounds coordinates.
+    /// Expands `live_bbox` when the cell becomes alive (does not shrink it
+    /// when the cell dies — the bbox is conservative).
     pub fn toggle(&mut self, row: usize, col: usize) {
         if row < self.height && col < self.width {
             let idx = row * self.width + col;
-            self.cells[idx] = !self.cells[idx];
+            let new_alive = !self.cells[idx];
+            self.cells[idx] = new_alive;
+            if new_alive {
+                self.include_in_bbox(row, col);
+            }
         }
     }
 
-    /// Sets every cell to dead.
+    /// Sets every cell to dead and resets both buffers and bounding box.
     pub fn clear(&mut self) {
         self.cells.fill(false);
         self.next.fill(false);
+        self.live_bbox = None;
+        self.active_region = None;
     }
 
     /// Advances the simulation by one generation using Conway's rules:
@@ -79,42 +108,72 @@ impl Grid {
     ///
     /// Out-of-bounds neighbours are treated as dead (finite, non-wrapping boundary).
     ///
-    /// Uses a pre-allocated `next` scratch buffer — no heap allocation occurs per step.
-    /// The new generation is computed in parallel across all cells using Rayon, then
-    /// `cells` and `next` are swapped with a pointer flip.
+    /// ## Optimisations
+    /// - **Dirty rectangle**: only cells within `live_bbox ± 1` are evaluated.
+    /// - **Double-buffer**: writes to `next` and swaps — no heap allocation.
+    /// - **Rayon parallelism**: the active rows are processed in parallel.
     pub fn step(&mut self) {
         let width = self.width;
         let height = self.height;
-        // Split borrows: `cells` is read-only, `next` is write-only — no data race.
+
+        // Early exit when the grid is empty — nothing can change.
+        let Some([rmin, cmin, rmax, cmax]) = self.live_bbox else {
+            return;
+        };
+
+        // Active region = live_bbox expanded by 1, clamped to grid bounds.
+        let r0 = rmin.saturating_sub(1);
+        let c0 = cmin.saturating_sub(1);
+        let r1 = (rmax + 1).min(height - 1);
+        let c1 = (cmax + 1).min(width - 1);
+
+        // Zero stale values from the previous active region in `next`.
+        // Cells outside the new active region must be false before the swap.
+        if let Some([or0, oc0, or1, oc1]) = self.active_region {
+            self.next[or0 * width..(or1 + 1) * width]
+                .par_chunks_mut(width)
+                .for_each(|row_slice| {
+                    row_slice[oc0..=oc1].fill(false);
+                });
+        }
+
+        // Compute the next generation in the active region (parallel over rows).
         let cells = &self.cells;
-        self.next
-            .par_iter_mut()
+        self.next[r0 * width..(r1 + 1) * width]
+            .par_chunks_mut(width)
             .enumerate()
-            .for_each(|(idx, cell)| {
-                let row = idx / width;
-                let col = idx % width;
-                let n = count_neighbors(cells, width, height, row, col);
-                let alive = cells[idx];
-                *cell = matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
+            .for_each(|(i, row_slice)| {
+                let row = r0 + i;
+                for col in c0..=c1 {
+                    let n = count_neighbors(cells, width, height, row, col);
+                    let alive = cells[row * width + col];
+                    row_slice[col] = matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
+                }
             });
+
         std::mem::swap(&mut self.cells, &mut self.next);
+
+        // Recompute live_bbox from the new state within the active region.
+        self.live_bbox = self.scan_live_bbox(r0, c0, r1, c1);
+        self.active_region = Some([r0, c0, r1, c1]);
     }
 
     /// Clears the grid and places `pattern` centred at `(height/2, width/2)`.
     ///
     /// Cells whose computed position falls outside the grid bounds are silently skipped.
+    /// `live_bbox` is rebuilt from the pattern cells via repeated `set` calls.
     ///
     /// # Arguments
     /// * `pattern` — the preset pattern to load
     pub fn set_pattern(&mut self, pattern: Pattern) {
-        self.clear();
+        self.clear(); // resets live_bbox to None
         let origin_row = (self.height / 2) as i32;
         let origin_col = (self.width / 2) as i32;
         for (dr, dc) in pattern_cells(pattern) {
             let r = origin_row + dr;
             let c = origin_col + dc;
             if r >= 0 && c >= 0 && (r as usize) < self.height && (c as usize) < self.width {
-                self.set(r as usize, c as usize, true);
+                self.set(r as usize, c as usize, true); // set() updates live_bbox
             }
         }
     }
@@ -124,6 +183,7 @@ impl Grid {
     ///
     /// Returns `(added_top_rows, added_left_cols)` so the caller can compensate its
     /// scroll offset and keep the viewport centred on the same region.
+    /// `live_bbox` and `active_region` are shifted to match the new layout.
     pub fn expand_if_needed(&mut self) -> (usize, usize) {
         const MARGIN: usize = 20;
         let top = (0..self.width).any(|c| self.get(0, c));
@@ -154,7 +214,57 @@ impl Grid {
         self.height = new_h;
         self.cells = new_cells;
         self.next = vec![false; n]; // resize scratch buffer to match
+
+        // Shift bbox and active_region to account for the new top/left padding.
+        fn shift(bbox: [usize; 4], dr: usize, dc: usize) -> [usize; 4] {
+            [bbox[0] + dr, bbox[1] + dc, bbox[2] + dr, bbox[3] + dc]
+        }
+        self.live_bbox = self.live_bbox.map(|b| shift(b, add_top, add_left));
+        self.active_region = self.active_region.map(|b| shift(b, add_top, add_left));
+
         (add_top, add_left)
+    }
+
+    // ── Private helpers ───────────────────────────────────────────────────────
+
+    /// Expands `live_bbox` to include the cell at `(row, col)`.
+    fn include_in_bbox(&mut self, row: usize, col: usize) {
+        self.live_bbox = Some(match self.live_bbox {
+            None => [row, col, row, col],
+            Some([rmin, cmin, rmax, cmax]) => {
+                [rmin.min(row), cmin.min(col), rmax.max(row), cmax.max(col)]
+            }
+        });
+    }
+
+    /// Scans `cells` within `[r0..=r1, c0..=c1]` and returns the tight
+    /// bounding box of all live cells found, or `None` if all cells are dead.
+    ///
+    /// # Arguments
+    /// * `r0`, `c0` — inclusive start of scan region (rows, cols)
+    /// * `r1`, `c1` — inclusive end of scan region (rows, cols)
+    fn scan_live_bbox(&self, r0: usize, c0: usize, r1: usize, c1: usize) -> Option<[usize; 4]> {
+        let mut rmin = usize::MAX;
+        let mut cmin = usize::MAX;
+        let mut rmax = 0usize;
+        let mut cmax = 0usize;
+        let mut any = false;
+        for row in r0..=r1 {
+            for col in c0..=c1 {
+                if self.cells[row * self.width + col] {
+                    any = true;
+                    rmin = rmin.min(row);
+                    cmin = cmin.min(col);
+                    rmax = rmax.max(row);
+                    cmax = cmax.max(col);
+                }
+            }
+        }
+        if any {
+            Some([rmin, cmin, rmax, cmax])
+        } else {
+            None
+        }
     }
 }
 
@@ -349,6 +459,54 @@ mod tests {
         assert!(
             !g.get(0, 0),
             "sentinel cell should be cleared after set_pattern"
+        );
+    }
+
+    #[test]
+    fn test_live_bbox_tracks_cells() {
+        let mut g = Grid::new(20, 20);
+        assert!(g.live_bbox.is_none(), "new grid should have no bbox");
+
+        g.set(5, 8, true);
+        assert_eq!(g.live_bbox, Some([5, 8, 5, 8]));
+
+        g.set(3, 2, true);
+        assert_eq!(g.live_bbox, Some([3, 2, 5, 8]));
+
+        g.clear();
+        assert!(g.live_bbox.is_none());
+    }
+
+    #[test]
+    fn test_dirty_rect_step_correctness() {
+        // Run a 100-step glider and verify results match a brute-force reference.
+        // This catches any dirty-rect over/under-counting bugs.
+        let live = &[(10, 11), (11, 12), (12, 10), (12, 11), (12, 12)];
+        let mut optimised = make_grid(60, 60, live);
+        let mut reference = make_grid(60, 60, live);
+
+        // Step reference using full-grid scan (temporarily bypass dirty-rect).
+        for _ in 0..50 {
+            optimised.step();
+            // Reference step: brute-force full scan
+            let w = reference.width;
+            let h = reference.height;
+            let cells_snap = reference.cells.clone();
+            for row in 0..h {
+                for col in 0..w {
+                    let n = count_neighbors(&cells_snap, w, h, row, col);
+                    let alive = cells_snap[row * w + col];
+                    reference.cells[row * w + col] =
+                        matches!((alive, n), (true, 2) | (true, 3) | (false, 3));
+                }
+            }
+            reference.live_bbox = reference.scan_live_bbox(0, 0, h - 1, w - 1);
+        }
+
+        assert_eq!(
+            live_cells(&optimised),
+            live_cells(&reference),
+            "dirty-rect and brute-force states diverged after 50 steps"
         );
     }
 }

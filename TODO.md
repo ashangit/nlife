@@ -11,10 +11,6 @@ highest to lowest impact / easiest to hardest.
   cell) instead of `Vec<bool>` (1 byte per cell). Cuts memory by 8× and enables
   SIMD/bitwise neighbour counting.
 
-- [ ] **Dirty-rectangle tracking** — record the bounding box of cells that actually
-  changed last step. Restrict the next step and the painter to that region instead of
-  scanning the full grid.
-
 - [ ] **GPU rendering with `egui_wgpu`** — upload the cell grid as a texture (one pixel
   per cell, alive = white, dead = black) and draw a full-screen quad with a fragment
   shader. Completely removes per-cell CPU draw calls.
