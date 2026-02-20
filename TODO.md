@@ -11,10 +11,6 @@ highest to lowest impact / easiest to hardest.
 
 ## 2. Faster Generation Computing
 
-- [ ] **Active-cell frontier** — maintain a `HashSet` of cells that have at least one
-  live neighbour. Only evaluate those cells each step (O(live + border) instead of
-  O(width × height)). Ideal for sparse patterns like glider guns.
-
 - [ ] **SIMD neighbour counting** — with bit-packed rows, use SIMD shifts and bitwise
   operations to count all 8 neighbours for 64 cells simultaneously (one `u64` word
   per instruction group).
