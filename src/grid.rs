@@ -2,6 +2,9 @@ use std::collections::HashSet;
 
 use crate::patterns::{pattern_cells, Pattern};
 
+/// Dead-cell margin added on each side when the grid expands.
+const MARGIN: usize = 20;
+
 // ── Bit-manipulation helpers ──────────────────────────────────────────────────
 
 /// Returns `true` if the bit at `(row, col)` is set in the bit-packed slice.
@@ -389,7 +392,7 @@ impl Grid {
         self.clear();
         let origin_row = (self.height / 2) as i32;
         let origin_col = (self.width / 2) as i32;
-        for (dr, dc) in pattern_cells(pattern) {
+        for &(dr, dc) in pattern_cells(pattern) {
             let r = origin_row + dr;
             let c = origin_col + dc;
             if r >= 0 && c >= 0 && (r as usize) < self.height && (c as usize) < self.width {
@@ -406,7 +409,6 @@ impl Grid {
     /// compensate its scroll offset.  `live_bbox` and `frontier` are shifted;
     /// `prev_written_words` is cleared (the fresh `next` buffer has no stale data).
     pub fn expand_if_needed(&mut self) -> (usize, usize) {
-        const MARGIN: usize = 20;
         let top = (0..self.width).any(|c| self.get(0, c));
         let bottom = (0..self.width).any(|c| self.get(self.height - 1, c));
         let left = (0..self.height).any(|r| self.get(r, 0));
@@ -827,6 +829,125 @@ mod tests {
             g.frontier.is_empty(),
             "frontier should be empty after clear"
         );
+    }
+
+    /// Asserts that `set_pattern(pattern)` on a 100×60 grid places exactly
+    /// `expected_count` live cells, all within bounds, and that the centroid of
+    /// those cells lies within ±1 cell of the grid centre `(height/2, width/2)`.
+    ///
+    /// # Arguments
+    /// * `pattern`        — the pattern variant to test
+    /// * `expected_count` — expected number of live cells after loading
+    fn assert_pattern_valid(pattern: Pattern, expected_count: usize) {
+        let width = 100usize;
+        let height = 60usize;
+        let mut g = Grid::new(width, height);
+        g.set_pattern(pattern);
+
+        let cells: Vec<(usize, usize)> = (0..height)
+            .flat_map(|r| (0..width).map(move |c| (r, c)))
+            .filter(|&(r, c)| g.get(r, c))
+            .collect();
+
+        // 1. Cell-count check.
+        assert_eq!(
+            cells.len(),
+            expected_count,
+            "{pattern:?}: expected {expected_count} live cells, got {}",
+            cells.len()
+        );
+
+        // 2. Bounds check: every live cell is inside [0, height) × [0, width).
+        for &(r, c) in &cells {
+            assert!(
+                r < height,
+                "{pattern:?}: row {r} out of bounds [0, {height})"
+            );
+            assert!(c < width, "{pattern:?}: col {c} out of bounds [0, {width})");
+        }
+
+        // 3. Centroid within ±1 cell of (height/2, width/2).
+        if !cells.is_empty() {
+            let sum_r: f64 = cells.iter().map(|&(r, _)| r as f64).sum();
+            let sum_c: f64 = cells.iter().map(|&(_, c)| c as f64).sum();
+            let centroid_r = sum_r / cells.len() as f64;
+            let centroid_c = sum_c / cells.len() as f64;
+            let center_r = height as f64 / 2.0;
+            let center_c = width as f64 / 2.0;
+            assert!(
+                (centroid_r - center_r).abs() <= 1.0,
+                "{pattern:?}: centroid row {centroid_r:.2} not within ±1 of centre {center_r}"
+            );
+            assert!(
+                (centroid_c - center_c).abs() <= 1.0,
+                "{pattern:?}: centroid col {centroid_c:.2} not within ±1 of centre {center_c}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_set_pattern_block() {
+        assert_pattern_valid(Pattern::Block, 4);
+    }
+    #[test]
+    fn test_set_pattern_beehive() {
+        assert_pattern_valid(Pattern::Beehive, 6);
+    }
+    #[test]
+    fn test_set_pattern_loaf() {
+        assert_pattern_valid(Pattern::Loaf, 7);
+    }
+    #[test]
+    fn test_set_pattern_boat() {
+        assert_pattern_valid(Pattern::Boat, 5);
+    }
+    #[test]
+    fn test_set_pattern_blinker() {
+        assert_pattern_valid(Pattern::Blinker, 3);
+    }
+    #[test]
+    fn test_set_pattern_toad() {
+        assert_pattern_valid(Pattern::Toad, 6);
+    }
+    #[test]
+    fn test_set_pattern_beacon() {
+        assert_pattern_valid(Pattern::Beacon, 8);
+    }
+    #[test]
+    fn test_set_pattern_pulsar() {
+        assert_pattern_valid(Pattern::Pulsar, 48);
+    }
+    #[test]
+    fn test_set_pattern_pentadecathlon() {
+        assert_pattern_valid(Pattern::Pentadecathlon, 10);
+    }
+    #[test]
+    fn test_set_pattern_glider() {
+        assert_pattern_valid(Pattern::Glider, 5);
+    }
+    #[test]
+    fn test_set_pattern_lwss() {
+        assert_pattern_valid(Pattern::Lwss, 9);
+    }
+    #[test]
+    fn test_set_pattern_mwss() {
+        assert_pattern_valid(Pattern::Mwss, 11);
+    }
+    #[test]
+    fn test_set_pattern_hwss() {
+        assert_pattern_valid(Pattern::Hwss, 13);
+    }
+    #[test]
+    fn test_set_pattern_rpentomino() {
+        assert_pattern_valid(Pattern::RPentomino, 5);
+    }
+    #[test]
+    fn test_set_pattern_acorn() {
+        assert_pattern_valid(Pattern::Acorn, 7);
+    }
+    #[test]
+    fn test_set_pattern_diehard() {
+        assert_pattern_valid(Pattern::Diehard, 7);
     }
 
     #[test]

@@ -1,6 +1,10 @@
 mod app;
+mod camera;
 mod grid;
+mod input;
 mod patterns;
+mod simulation;
+mod ui;
 
 use app::GameOfLifeApp;
 

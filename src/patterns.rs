@@ -42,6 +42,221 @@ pub enum Pattern {
     Diehard,
 }
 
+// ── Pattern cell data (const slices) ─────────────────────────────────────────
+
+// Block: 2×2 square
+//  OO
+//  OO
+const BLOCK: &[(i32, i32)] = &[(0, 0), (0, 1), (1, 0), (1, 1)];
+
+// Beehive: bounding box 3 rows × 4 cols, centred at (1, 1)
+//  .OO.
+//  O..O
+//  .OO.
+const BEEHIVE: &[(i32, i32)] = &[(-1, 0), (-1, 1), (0, -1), (0, 2), (1, 0), (1, 1)];
+
+// Loaf: bounding box 4 rows × 4 cols, centred at (2, 2)
+//  .OO.
+//  O..O
+//  .O.O
+//  ..O.
+const LOAF: &[(i32, i32)] = &[
+    (-2, -1),
+    (-2, 0),
+    (-1, -2),
+    (-1, 1),
+    (0, -1),
+    (0, 1),
+    (1, 0),
+];
+
+// Boat: bounding box 3 rows × 3 cols, centred at (1, 1)
+//  OO.
+//  O.O
+//  .O.
+const BOAT: &[(i32, i32)] = &[(-1, -1), (-1, 0), (0, -1), (0, 1), (1, 0)];
+
+// Blinker (p2): 3 cells in a row
+const BLINKER: &[(i32, i32)] = &[(0, -1), (0, 0), (0, 1)];
+
+// Toad (p2): two offset rows of 3, bounding box 2 rows × 4 cols
+//  .OOO
+//  OOO.
+const TOAD: &[(i32, i32)] = &[(0, 0), (0, 1), (0, 2), (1, -1), (1, 0), (1, 1)];
+
+// Beacon (p2): two touching 2×2 blocks, bounding box 4 rows × 4 cols, centred at (2, 2)
+//  OO..
+//  OO..
+//  ..OO
+//  ..OO
+const BEACON: &[(i32, i32)] = &[
+    (-2, -2),
+    (-2, -1),
+    (-1, -2),
+    (-1, -1),
+    (0, 0),
+    (0, 1),
+    (1, 0),
+    (1, 1),
+];
+
+// Pulsar (p3): 48-cell symmetric oscillator.
+// Cross-shaped arms at row offsets ±2/±7 (horizontal bars) and
+// col offsets ±2/±7 (vertical bars), spanning cols/rows ±4..±6.
+// Enumerated from:
+//   for r_sign in [-1, 1], c_sign in [-1, 1]:
+//     arm_col in [4, 5, 6]: (r_sign*2, c_sign*arm_col), (r_sign*7, c_sign*arm_col)
+//     arm_row in [4, 5, 6]: (r_sign*arm_row, c_sign*2), (r_sign*arm_row, c_sign*7)
+const PULSAR: &[(i32, i32)] = &[
+    // r=1, c=1
+    (2, 4),
+    (7, 4),
+    (2, 5),
+    (7, 5),
+    (2, 6),
+    (7, 6),
+    (4, 2),
+    (4, 7),
+    (5, 2),
+    (5, 7),
+    (6, 2),
+    (6, 7),
+    // r=1, c=-1
+    (2, -4),
+    (7, -4),
+    (2, -5),
+    (7, -5),
+    (2, -6),
+    (7, -6),
+    (4, -2),
+    (4, -7),
+    (5, -2),
+    (5, -7),
+    (6, -2),
+    (6, -7),
+    // r=-1, c=1
+    (-2, 4),
+    (-7, 4),
+    (-2, 5),
+    (-7, 5),
+    (-2, 6),
+    (-7, 6),
+    (-4, 2),
+    (-4, 7),
+    (-5, 2),
+    (-5, 7),
+    (-6, 2),
+    (-6, 7),
+    // r=-1, c=-1
+    (-2, -4),
+    (-7, -4),
+    (-2, -5),
+    (-7, -5),
+    (-2, -6),
+    (-7, -6),
+    (-4, -2),
+    (-4, -7),
+    (-5, -2),
+    (-5, -7),
+    (-6, -2),
+    (-6, -7),
+];
+
+// Pentadecathlon (p15): row of 10 cells (the classic "polyomino" phase)
+const PENTADECATHLON: &[(i32, i32)] = &[
+    (0, -5),
+    (0, -4),
+    (0, -3),
+    (0, -2),
+    (0, -1),
+    (0, 0),
+    (0, 1),
+    (0, 2),
+    (0, 3),
+    (0, 4),
+];
+
+const GLIDER: &[(i32, i32)] = &[(-1, 0), (0, 1), (1, -1), (1, 0), (1, 1)];
+
+// LWSS (c/2): bounding box 4 rows × 5 cols (cols 0-4), centred at (2, 2)
+//  .O..O
+//  O....
+//  O...O
+//  .OOOO
+const LWSS: &[(i32, i32)] = &[
+    (-2, -1),
+    (-2, 2),
+    (-1, -2),
+    (0, -2),
+    (0, 2),
+    (1, -1),
+    (1, 0),
+    (1, 1),
+    (1, 2),
+];
+
+// MWSS (c/2): bounding box 5 rows × 6 cols (cols 0-5), centred at (2, 3)
+//  ..O...
+//  O....O
+//  .....O
+//  O....O
+//  .OOOOO
+const MWSS: &[(i32, i32)] = &[
+    (-2, -1),
+    (-1, -3),
+    (-1, 2),
+    (0, 2),
+    (1, -3),
+    (1, 2),
+    (2, -2),
+    (2, -1),
+    (2, 0),
+    (2, 1),
+    (2, 2),
+];
+
+// HWSS (c/2): bounding box 5 rows × 7 cols (cols 0-6), centred at (2, 3)
+//  .OO....
+//  O....O.
+//  ......O
+//  O.....O
+//  .OOOOOO
+const HWSS: &[(i32, i32)] = &[
+    (-2, -2),
+    (-2, -1),
+    (-1, -3),
+    (-1, 2),
+    (0, 3),
+    (1, -3),
+    (1, 3),
+    (2, -2),
+    (2, -1),
+    (2, 0),
+    (2, 1),
+    (2, 2),
+    (2, 3),
+];
+
+// R-pentomino: 5 cells, bounding box 3 rows × 3 cols
+//  .OO
+//  OO.
+//  .O.
+const R_PENTOMINO: &[(i32, i32)] = &[(-1, 0), (-1, 1), (0, -1), (0, 0), (1, 0)];
+
+// Acorn: 7 cells, bounding box 3 rows × 7 cols (cols 0-6), centred at (1, 3)
+//  .O.....
+//  ...O...
+//  OO..OOO
+const ACORN: &[(i32, i32)] = &[(-1, -2), (0, 0), (1, -3), (1, -2), (1, 1), (1, 2), (1, 3)];
+
+// Diehard: 7 cells, bounding box 3 rows × 8 cols (cols 0-7), centred at (1, 4)
+//  ......O.
+//  OO......
+//  .O...OOO
+const DIEHARD: &[(i32, i32)] = &[(-1, 2), (0, -4), (0, -3), (1, -3), (1, 1), (1, 2), (1, 3)];
+
+// ── Public API ────────────────────────────────────────────────────────────────
+
 /// Returns the list of `(row, col)` offsets from the grid centre for the given pattern.
 ///
 /// Each entry is a `(row_offset, col_offset)` applied to `(height/2, width/2)`.
@@ -52,182 +267,25 @@ pub enum Pattern {
 /// * `pattern` — the preset pattern to look up
 ///
 /// # Returns
-/// A `Vec<(i32, i32)>` of `(row_offset, col_offset)` pairs.
-pub fn pattern_cells(pattern: Pattern) -> Vec<(i32, i32)> {
+/// A `&'static [(i32, i32)]` slice of `(row_offset, col_offset)` pairs.
+pub fn pattern_cells(pattern: Pattern) -> &'static [(i32, i32)] {
     match pattern {
-        // ── Still Lifes ────────────────────────────────────────────────────────
-        // Block: 2×2 square
-        //  OO
-        //  OO
-        Pattern::Block => vec![(0, 0), (0, 1), (1, 0), (1, 1)],
-
-        // Beehive: bounding box 3 rows × 4 cols, centred at (1, 1)
-        //  .OO.
-        //  O..O
-        //  .OO.
-        Pattern::Beehive => vec![(-1, 0), (-1, 1), (0, -1), (0, 2), (1, 0), (1, 1)],
-
-        // Loaf: bounding box 4 rows × 4 cols, centred at (2, 2)
-        //  .OO.
-        //  O..O
-        //  .O.O
-        //  ..O.
-        Pattern::Loaf => vec![
-            (-2, -1),
-            (-2, 0),
-            (-1, -2),
-            (-1, 1),
-            (0, -1),
-            (0, 1),
-            (1, 0),
-        ],
-
-        // Boat: bounding box 3 rows × 3 cols, centred at (1, 1)
-        //  OO.
-        //  O.O
-        //  .O.
-        Pattern::Boat => vec![(-1, -1), (-1, 0), (0, -1), (0, 1), (1, 0)],
-
-        // ── Oscillators ───────────────────────────────────────────────────────
-        // Blinker (p2): 3 cells in a row
-        Pattern::Blinker => vec![(0, -1), (0, 0), (0, 1)],
-
-        // Toad (p2): two offset rows of 3, bounding box 2 rows × 4 cols
-        //  .OOO
-        //  OOO.
-        Pattern::Toad => vec![(0, 0), (0, 1), (0, 2), (1, -1), (1, 0), (1, 1)],
-
-        // Beacon (p2): two touching 2×2 blocks, bounding box 4 rows × 4 cols,
-        // centred at (2, 2)
-        //  OO..
-        //  OO..
-        //  ..OO
-        //  ..OO
-        Pattern::Beacon => vec![
-            (-2, -2),
-            (-2, -1),
-            (-1, -2),
-            (-1, -1),
-            (0, 0),
-            (0, 1),
-            (1, 0),
-            (1, 1),
-        ],
-
-        // Pulsar (p3): 48-cell symmetric oscillator.
-        // Defined by cross-shaped arms at offsets ±2/±7 (rows) and ±4..±6 (cols)
-        // plus the mirror image.
-        Pattern::Pulsar => {
-            let mut cells = Vec::new();
-            for &r_sign in &[-1i32, 1] {
-                for &c_sign in &[-1i32, 1] {
-                    for &arm_col in &[4i32, 5, 6] {
-                        cells.push((r_sign * 2, c_sign * arm_col));
-                        cells.push((r_sign * 7, c_sign * arm_col));
-                    }
-                    for &arm_row in &[4i32, 5, 6] {
-                        cells.push((r_sign * arm_row, c_sign * 2));
-                        cells.push((r_sign * arm_row, c_sign * 7));
-                    }
-                }
-            }
-            cells
-        }
-
-        // Pentadecathlon (p15): row of 10 cells (the classic "polyomino" phase)
-        Pattern::Pentadecathlon => vec![
-            (0, -5),
-            (0, -4),
-            (0, -3),
-            (0, -2),
-            (0, -1),
-            (0, 0),
-            (0, 1),
-            (0, 2),
-            (0, 3),
-            (0, 4),
-        ],
-
-        // ── Spaceships ────────────────────────────────────────────────────────
-        Pattern::Glider => vec![(-1, 0), (0, 1), (1, -1), (1, 0), (1, 1)],
-
-        // LWSS (c/2): bounding box 4 rows × 5 cols (cols 0-4), centred at (2, 2)
-        //  .O..O
-        //  O....
-        //  O...O
-        //  .OOOO
-        Pattern::Lwss => vec![
-            (-2, -1),
-            (-2, 2),
-            (-1, -2),
-            (0, -2),
-            (0, 2),
-            (1, -1),
-            (1, 0),
-            (1, 1),
-            (1, 2),
-        ],
-
-        // MWSS (c/2): bounding box 5 rows × 6 cols (cols 0-5), centred at (2, 3)
-        //  ..O...
-        //  O....O
-        //  .....O
-        //  O....O
-        //  .OOOOO
-        Pattern::Mwss => vec![
-            (-2, -1),
-            (-1, -3),
-            (-1, 2),
-            (0, 2),
-            (1, -3),
-            (1, 2),
-            (2, -2),
-            (2, -1),
-            (2, 0),
-            (2, 1),
-            (2, 2),
-        ],
-
-        // HWSS (c/2): bounding box 5 rows × 7 cols (cols 0-6), centred at (2, 3)
-        //  .OO....
-        //  O....O.
-        //  ......O
-        //  O.....O
-        //  .OOOOOO
-        Pattern::Hwss => vec![
-            (-2, -2),
-            (-2, -1),
-            (-1, -3),
-            (-1, 2),
-            (0, 3),
-            (1, -3),
-            (1, 3),
-            (2, -2),
-            (2, -1),
-            (2, 0),
-            (2, 1),
-            (2, 2),
-            (2, 3),
-        ],
-
-        // ── Methuselahs ───────────────────────────────────────────────────────
-        // R-pentomino: 5 cells, bounding box 3 rows × 3 cols
-        //  .OO
-        //  OO.
-        //  .O.
-        Pattern::RPentomino => vec![(-1, 0), (-1, 1), (0, -1), (0, 0), (1, 0)],
-
-        // Acorn: 7 cells, bounding box 3 rows × 7 cols (cols 0-6), centred at (1, 3)
-        //  .O.....
-        //  ...O...
-        //  OO..OOO
-        Pattern::Acorn => vec![(-1, -2), (0, 0), (1, -3), (1, -2), (1, 1), (1, 2), (1, 3)],
-
-        // Diehard: 7 cells, bounding box 3 rows × 8 cols (cols 0-7), centred at (1, 4)
-        //  ......O.
-        //  OO......
-        //  .O...OOO
-        Pattern::Diehard => vec![(-1, 2), (0, -4), (0, -3), (1, -3), (1, 1), (1, 2), (1, 3)],
+        Pattern::Block => BLOCK,
+        Pattern::Beehive => BEEHIVE,
+        Pattern::Loaf => LOAF,
+        Pattern::Boat => BOAT,
+        Pattern::Blinker => BLINKER,
+        Pattern::Toad => TOAD,
+        Pattern::Beacon => BEACON,
+        Pattern::Pulsar => PULSAR,
+        Pattern::Pentadecathlon => PENTADECATHLON,
+        Pattern::Glider => GLIDER,
+        Pattern::Lwss => LWSS,
+        Pattern::Mwss => MWSS,
+        Pattern::Hwss => HWSS,
+        Pattern::RPentomino => R_PENTOMINO,
+        Pattern::Acorn => ACORN,
+        Pattern::Diehard => DIEHARD,
     }
 }
 
@@ -341,7 +399,7 @@ mod tests {
         ] {
             let cells = pattern_cells(pattern);
             let mut seen = std::collections::HashSet::new();
-            for cell in &cells {
+            for cell in cells {
                 assert!(
                     seen.insert(cell),
                     "Duplicate cell {cell:?} in pattern {pattern:?}",
@@ -359,7 +417,7 @@ mod tests {
         let mut g = Grid::new(20, 20);
         let cr = 10i32;
         let cc = 10i32;
-        for (dr, dc) in pattern_cells(Pattern::Block) {
+        for &(dr, dc) in pattern_cells(Pattern::Block) {
             g.set((cr + dr) as usize, (cc + dc) as usize, true);
         }
         let before: Vec<_> = (0..g.height)
@@ -381,7 +439,7 @@ mod tests {
         let mut g = Grid::new(20, 20);
         let cr = 10i32;
         let cc = 10i32;
-        for (dr, dc) in pattern_cells(Pattern::Toad) {
+        for &(dr, dc) in pattern_cells(Pattern::Toad) {
             g.set((cr + dr) as usize, (cc + dc) as usize, true);
         }
         let before: Vec<_> = (0..g.height)
@@ -404,7 +462,7 @@ mod tests {
         let mut g = Grid::new(20, 20);
         let cr = 10i32;
         let cc = 10i32;
-        for (dr, dc) in pattern_cells(Pattern::Beacon) {
+        for &(dr, dc) in pattern_cells(Pattern::Beacon) {
             g.set((cr + dr) as usize, (cc + dc) as usize, true);
         }
         let before: Vec<_> = (0..g.height)

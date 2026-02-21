@@ -11,47 +11,9 @@ highest to lowest impact / easiest to hardest.
 
 ## 2. Faster Generation Computing
 
-- [ ] **HashLife / Gosper algorithm** — recursive quad-tree memoisation that can advance
-  a pattern by 2^n generations in O(unique-quad-trees) time. Essential for
-  methuselahs like Acorn (5206 gen) and gun patterns. Consider integrating the
-  `hashlife` crate or porting the algorithm.
-
-- [ ] **Configurable step-ahead** — expose a "steps per frame" integer in the UI (e.g.
-  1, 2, 4, 8 …) so users can trade visual smoothness for raw throughput without
-  having to max out the speed slider.
-
 ---
 
 ## 3. Code Refactoring / Maintainability
-
-- [ ] **Split `app.rs` into sub-modules** — the file already handles rendering, input,
-  simulation timing, and the top panel. Extract into:
-  - `src/ui/panel.rs`   — top control panel
-  - `src/ui/grid_view.rs` — grid painter + mouse handler
-  - `src/input.rs`      — keyboard & zoom handlers
-  - `src/simulation.rs` — `advance_simulation`, `step_once`
-
-- [ ] **Separate simulation state from render state** — introduce a plain `Simulation`
-  struct (`grid`, `generation`, `running`, `speed`) with no egui dependency, and keep
-  egui-specific fields (`scroll_offset`, `viewport_rect`, `cell_size`, …) in the app
-  layer. Makes unit-testing the logic trivial.
-
-- [ ] **Load pattern coordinates from data, not code** — move pattern cell lists to
-  static data (e.g. `const` arrays or a `patterns/` directory of `.cells` files
-  parsed at startup). Eliminates the need to recompile when adding new patterns.
-
-- [ ] **Introduce a `Camera` type** — encapsulate `cell_size`, `scroll_offset`, and
-  `viewport_rect` together with `apply_zoom`, `apply_expansion`, and
-  screen-to-cell conversion. Reduces parameter passing and makes zoom logic testable
-  in isolation.
-
-- [ ] **Replace magic numbers with named constants** — grid `MARGIN` (20) in `grid.rs`,
-  gap size (1.0) in `paint_cells`, `DEFAULT_CELL_SIZE` ratio already exists but
-  other numbers are inline.
-
-- [ ] **Add integration tests for `set_pattern`** — verify that each pattern lands at the
-  expected grid coordinates, does not overflow bounds, and produces the correct cell
-  count after `set_pattern`.
 
 ---
 
