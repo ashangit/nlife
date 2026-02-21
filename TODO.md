@@ -11,10 +11,6 @@ highest to lowest impact / easiest to hardest.
 
 ## 2. Faster Generation Computing
 
-- [ ] **SIMD neighbour counting** — with bit-packed rows, use SIMD shifts and bitwise
-  operations to count all 8 neighbours for 64 cells simultaneously (one `u64` word
-  per instruction group).
-
 - [ ] **HashLife / Gosper algorithm** — recursive quad-tree memoisation that can advance
   a pattern by 2^n generations in O(unique-quad-trees) time. Essential for
   methuselahs like Acorn (5206 gen) and gun patterns. Consider integrating the
