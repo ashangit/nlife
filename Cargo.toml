@@ -4,11 +4,18 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-eframe = { version = "0.31", default-features = false, features = [
+eframe = { version = "0.33", default-features = false, features = [
     "default_fonts", "wgpu", "wayland",
 ] }
-egui   = "0.31"
-rayon  = "1"
+egui  = "0.33"
+rayon = "1"
+# Re-enable the Vulkan backend: egui-wgpu 0.33 pulls wgpu with
+# default-features = false, so no GPU backend is compiled in otherwise.
+wgpu  = { version = "27", features = ["vulkan"] }
 
 [profile.release]
-opt-level = 3
+opt-level     = 3        # maximum optimisation
+lto           = "fat"    # cross-crate link-time optimisation
+codegen-units = 1        # single codegen unit enables more inlining
+panic         = "abort"  # smaller binary, no unwinding overhead
+strip         = true     # strip debug symbols from release binary

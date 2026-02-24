@@ -33,26 +33,8 @@ highest to lowest impact / easiest to hardest.
 
 ## 5. Pattern Library
 
-- [x] **RLE / `.cells` file parser** — implement a parser for the two most common GoL
-  file formats so any pattern from LifeWiki can be loaded without hand-coding
-  coordinates.
-
-- [x] **Embed all LifeWiki "small" patterns** — add the ~200 well-known patterns (still
-  lifes up to 14 cells, all common oscillators, all known period spaceships) as
-  built-in presets loaded from embedded RLE strings.
-
-- [x] **Pattern browser panel** — a scrollable side panel (or modal) with categories,
-  a search field, a miniature preview of each pattern, and a single-click to load.
-
-- [x] **User-defined pattern library** — let users save the current selection as a named
-  pattern stored in `~/.config/newlife/patterns/`, which then appears in the browser
-  alongside the built-ins.
-
 - [ ] **More oscillators** — still missing:
-  - Clock (p2, 8 cells) — RLE not yet verified
-
-- [ ] **More spaceships** — still missing:
-  - Canada Goose (c/4 diagonal, 26 cells) — RLE not yet verified
+  - Clock (p2, 8 cells) — RLE not yet verified  
 
 - [ ] **More methuselahs** — still missing:
   - Die Hard extended (many variants)

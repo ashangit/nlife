@@ -1,5 +1,4 @@
 use crate::grid::Grid;
-use crate::patterns::Pattern;
 
 /// Initial grid width in cells.
 const GRID_COLS: usize = 100;
@@ -40,24 +39,11 @@ impl Simulation {
         }
     }
 
-    /// Loads a pattern, resets the generation counter, and stops the simulation.
-    ///
-    /// # Arguments
-    /// * `pattern` — the preset pattern to load into the grid
-    #[allow(dead_code)]
-    pub(crate) fn load_pattern(&mut self, pattern: Pattern) {
-        self.grid.set_pattern(pattern);
-        self.generation = 0;
-        self.running = false;
-        self.time_since_last_step = 0.0;
-    }
-
     /// Loads centred cell offsets as the new grid state, resets the generation
     /// counter, and stops the simulation.
     ///
-    /// This is the library-entry counterpart of [`load_pattern`].  The `cells`
-    /// slice is passed directly to [`Grid::set_cells`], which centres the
-    /// pattern at `(height/2, width/2)`.
+    /// The `cells` slice is passed directly to [`Grid::set_cells`], which
+    /// centres the pattern at `(height/2, width/2)`.
     ///
     /// # Arguments
     /// * `cells` — centred `(row_offset, col_offset)` pairs as returned by

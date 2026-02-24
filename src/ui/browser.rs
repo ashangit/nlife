@@ -84,6 +84,7 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
                         Some(Category::Methuselah),
                         "Methuselah",
                     );
+                    ui.selectable_value(&mut app.browser_category, Some(Category::Gun), "Gun");
                     ui.selectable_value(
                         &mut app.browser_category,
                         Some(Category::Custom),
@@ -219,6 +220,7 @@ fn category_label(cat: Option<Category>) -> &'static str {
         Some(Category::Oscillator) => "Oscillator",
         Some(Category::Spaceship) => "Spaceship",
         Some(Category::Methuselah) => "Methuselah",
+        Some(Category::Gun) => "Gun",
         Some(Category::Custom) => "Custom",
     }
 }
@@ -303,6 +305,7 @@ mod tests {
         assert_eq!(category_label(Some(Category::Oscillator)), "Oscillator");
         assert_eq!(category_label(Some(Category::Spaceship)), "Spaceship");
         assert_eq!(category_label(Some(Category::Methuselah)), "Methuselah");
+        assert_eq!(category_label(Some(Category::Gun)), "Gun");
         assert_eq!(category_label(Some(Category::Custom)), "Custom");
     }
 }
