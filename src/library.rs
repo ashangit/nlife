@@ -15,6 +15,10 @@ pub enum Category {
     Methuselah,
     /// Patterns that periodically emit spaceships.
     Gun,
+    /// Patterns that move while leaving behind debris or other patterns.
+    Puffer,
+    /// Infinite wick or fuse patterns.
+    Wick,
     /// User-saved patterns loaded from `~/.config/newlife/patterns/`.
     Custom,
 }

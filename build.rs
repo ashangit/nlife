@@ -19,6 +19,8 @@ const CATEGORIES: &[(&str, &str)] = &[
     ("gun", "Category::Gun"),
     ("spaceship", "Category::Spaceship"),
     ("methuselah", "Category::Methuselah"),
+    ("puffer", "Category::Puffer"),
+    ("wick", "Category::Wick"),
 ];
 
 fn main() {

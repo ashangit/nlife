@@ -1,7 +1,7 @@
 use egui::{Painter, Pos2, Rect, Sense, Vec2};
 
 use crate::app::GameOfLifeApp;
-use crate::library::{decoded_library, Category};
+use crate::library::{Category, decoded_library};
 use crate::rle::write_cells;
 use crate::ui::grid_view::{COLOR_ALIVE, COLOR_BG};
 
@@ -112,10 +112,10 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
                     let show_builtin = filter_cat.map(|c| c != Category::Custom).unwrap_or(true);
                     if show_builtin {
                         for (entry, cells) in decoded_library() {
-                            if let Some(cat) = filter_cat {
-                                if entry.category != cat {
-                                    continue;
-                                }
+                            if let Some(cat) = filter_cat
+                                && entry.category != cat
+                            {
+                                continue;
                             }
                             if !search_lower.is_empty()
                                 && !entry.name.to_ascii_lowercase().contains(&search_lower)
@@ -221,6 +221,8 @@ fn category_label(cat: Option<Category>) -> &'static str {
         Some(Category::Spaceship) => "Spaceship",
         Some(Category::Methuselah) => "Methuselah",
         Some(Category::Gun) => "Gun",
+        Some(Category::Puffer) => "Puffer",
+        Some(Category::Wick) => "Wick",
         Some(Category::Custom) => "Custom",
     }
 }

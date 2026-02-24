@@ -53,33 +53,29 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
     let (w, h) = (app.sim.grid.width, app.sim.grid.height);
 
     // Handle single click (press+release without drag)
-    if response.clicked() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            if let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h) {
-                app.sim.grid.toggle(row, col);
-            }
-        }
+    if response.clicked()
+        && let Some(pos) = response.interact_pointer_pos()
+        && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
+    {
+        app.sim.grid.toggle(row, col);
     }
 
-    if response.drag_started() {
-        if let Some(pos) = response.interact_pointer_pos() {
-            if let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h) {
-                // The new state is the opposite of the current cell state
-                let old_state = app.sim.grid.get(row, col);
-                app.drag_paint_state = Some(!old_state);
-                app.sim.grid.toggle(row, col);
-            }
-        }
+    if response.drag_started()
+        && let Some(pos) = response.interact_pointer_pos()
+        && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
+    {
+        // The new state is the opposite of the current cell state
+        let old_state = app.sim.grid.get(row, col);
+        app.drag_paint_state = Some(!old_state);
+        app.sim.grid.toggle(row, col);
     }
 
-    if response.dragged() {
-        if let (Some(pos), Some(paint_alive)) =
+    if response.dragged()
+        && let (Some(pos), Some(paint_alive)) =
             (response.interact_pointer_pos(), app.drag_paint_state)
-        {
-            if let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h) {
-                app.sim.grid.set(row, col, paint_alive);
-            }
-        }
+        && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
+    {
+        app.sim.grid.set(row, col, paint_alive);
     }
 
     if response.drag_stopped() {

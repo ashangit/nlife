@@ -18,8 +18,10 @@ cargo build --release # optimised build
 
 - **Always plan first**: for any non-trivial change (new feature, multi-file edit, refactor)
   use `EnterPlanMode`, design the approach, and get user approval before writing any code.
-- **Commit after every change**: once tests, linter, and formatter all pass, create a git
-  commit covering that change.  Do not bundle unrelated changes into a single commit.
+- **Commit after every source code change**: once tests, linter, and formatter all pass,
+  create a git commit.  Do not bundle unrelated changes into a single commit.  The commit
+  message body must list every modified file with a concise explanation of what changed in
+  it and why (not just "updated X" — describe the actual change).
 - **Summarise changes**: after completing any modification, provide a summary listing every
   modified file and a brief description of what changed in each.
 - **Unit tests are mandatory**: every source code change must include corresponding test
