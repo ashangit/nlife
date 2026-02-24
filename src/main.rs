@@ -2,7 +2,9 @@ mod app;
 mod camera;
 mod grid;
 mod input;
+mod library;
 mod patterns;
+mod rle;
 mod simulation;
 mod ui;
 
