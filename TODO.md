@@ -28,15 +28,3 @@ highest to lowest impact / easiest to hardest.
 
 - [ ] **Smooth zoom animation** — interpolate `cell_size` toward a target value over a
   few frames instead of applying it instantly, giving a polished feel.
-
----
-
-## 5. Pattern Library
-
-- [ ] **More oscillators** — still missing:
-  - Clock (p2, 8 cells) — RLE not yet verified  
-
-- [ ] **More methuselahs** — still missing:
-  - Die Hard extended (many variants)
-  - Rabbits (17331 gen) — RLE not yet verified
-  - Bunnies (17489 gen) — RLE not yet verified
