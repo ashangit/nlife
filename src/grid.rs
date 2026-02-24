@@ -388,6 +388,7 @@ impl Grid {
     ///
     /// # Arguments
     /// * `pattern` — the preset pattern to load
+    #[allow(dead_code)]
     pub fn set_pattern(&mut self, pattern: Pattern) {
         self.clear();
         let origin_row = (self.height / 2) as i32;
@@ -412,7 +413,6 @@ impl Grid {
     /// # Arguments
     /// * `cells` — centred `(row_offset, col_offset)` pairs, e.g. from
     ///   `decoded_library()` or `center_cells()`
-    #[allow(dead_code)]
     pub fn set_cells(&mut self, cells: &[(i32, i32)]) {
         self.clear();
         let origin_row = (self.height / 2) as i32;

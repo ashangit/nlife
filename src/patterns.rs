@@ -1,3 +1,7 @@
+// Pattern enum and constants are exercised by unit tests; production loading
+// now goes through library::decoded_library() instead.
+#![allow(dead_code)]
+
 /// Available preset patterns for Conway's Game of Life, grouped by category.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Pattern {

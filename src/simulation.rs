@@ -44,6 +44,7 @@ impl Simulation {
     ///
     /// # Arguments
     /// * `pattern` — the preset pattern to load into the grid
+    #[allow(dead_code)]
     pub(crate) fn load_pattern(&mut self, pattern: Pattern) {
         self.grid.set_pattern(pattern);
         self.generation = 0;
@@ -61,7 +62,6 @@ impl Simulation {
     /// # Arguments
     /// * `cells` — centred `(row_offset, col_offset)` pairs as returned by
     ///   `decoded_library()` or `center_cells()`
-    #[allow(dead_code)]
     pub(crate) fn load_cells(&mut self, cells: &[(i32, i32)]) {
         self.grid.set_cells(cells);
         self.generation = 0;

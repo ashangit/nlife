@@ -1,6 +1,5 @@
 use crate::app::GameOfLifeApp;
 use crate::camera::{DEFAULT_CELL_SIZE, ZOOM_STEP};
-use crate::patterns::Pattern;
 
 /// Maximum number of simulation steps to run per visual frame.
 const MAX_STEPS_PER_FRAME: u32 = 1024;
@@ -61,74 +60,6 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
                     .range(1..=MAX_STEPS_PER_FRAME)
                     .speed(0.5),
             );
-        });
-
-        // Still Lifes
-        ui.horizontal(|ui| {
-            ui.label("Still Lifes:");
-            if ui.button("Block").clicked() {
-                app.sim.load_pattern(Pattern::Block);
-            }
-            if ui.button("Beehive").clicked() {
-                app.sim.load_pattern(Pattern::Beehive);
-            }
-            if ui.button("Loaf").clicked() {
-                app.sim.load_pattern(Pattern::Loaf);
-            }
-            if ui.button("Boat").clicked() {
-                app.sim.load_pattern(Pattern::Boat);
-            }
-        });
-
-        // Oscillators
-        ui.horizontal(|ui| {
-            ui.label("Oscillators:");
-            if ui.button("Blinker (p2)").clicked() {
-                app.sim.load_pattern(Pattern::Blinker);
-            }
-            if ui.button("Toad (p2)").clicked() {
-                app.sim.load_pattern(Pattern::Toad);
-            }
-            if ui.button("Beacon (p2)").clicked() {
-                app.sim.load_pattern(Pattern::Beacon);
-            }
-            if ui.button("Pulsar (p3)").clicked() {
-                app.sim.load_pattern(Pattern::Pulsar);
-            }
-            if ui.button("Pentadecathlon (p15)").clicked() {
-                app.sim.load_pattern(Pattern::Pentadecathlon);
-            }
-        });
-
-        // Spaceships
-        ui.horizontal(|ui| {
-            ui.label("Spaceships:");
-            if ui.button("Glider").clicked() {
-                app.sim.load_pattern(Pattern::Glider);
-            }
-            if ui.button("LWSS").clicked() {
-                app.sim.load_pattern(Pattern::Lwss);
-            }
-            if ui.button("MWSS").clicked() {
-                app.sim.load_pattern(Pattern::Mwss);
-            }
-            if ui.button("HWSS").clicked() {
-                app.sim.load_pattern(Pattern::Hwss);
-            }
-        });
-
-        // Methuselahs
-        ui.horizontal(|ui| {
-            ui.label("Methuselahs:");
-            if ui.button("R-Pentomino").clicked() {
-                app.sim.load_pattern(Pattern::RPentomino);
-            }
-            if ui.button("Acorn").clicked() {
-                app.sim.load_pattern(Pattern::Acorn);
-            }
-            if ui.button("Diehard").clicked() {
-                app.sim.load_pattern(Pattern::Diehard);
-            }
         });
     });
 }

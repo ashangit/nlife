@@ -7,7 +7,7 @@ const CELL_GAP_PX: f32 = 1.0;
 /// Background colour for the grid canvas.
 pub(crate) const COLOR_BG: Color32 = Color32::from_gray(30);
 /// Fill colour for live cells.
-const COLOR_ALIVE: Color32 = Color32::from_rgb(180, 230, 100);
+pub(crate) const COLOR_ALIVE: Color32 = Color32::from_rgb(180, 230, 100);
 /// Fill colour for dead cells.
 const COLOR_DEAD: Color32 = Color32::from_gray(45);
 

@@ -1,4 +1,5 @@
 use crate::camera::Camera;
+use crate::library::Category;
 use crate::simulation::Simulation;
 use crate::ui::COLOR_BG;
 
@@ -11,6 +12,10 @@ pub struct GameOfLifeApp {
     /// While the user is drag-painting, holds the alive/dead state being applied.
     /// `Some(true)` = painting alive, `Some(false)` = erasing.
     pub(crate) drag_paint_state: Option<bool>,
+    /// Active category filter in the pattern browser (`None` = All).
+    pub(crate) browser_category: Option<Category>,
+    /// Current text in the pattern browser name-search field.
+    pub(crate) browser_search: String,
 }
 
 impl GameOfLifeApp {
@@ -20,6 +25,8 @@ impl GameOfLifeApp {
             sim: Simulation::new(),
             camera: Camera::new(),
             drag_paint_state: None,
+            browser_category: None,
+            browser_search: String::new(),
         }
     }
 
@@ -43,6 +50,7 @@ impl eframe::App for GameOfLifeApp {
         crate::input::handle_zoom(self, ctx);
         self.advance_simulation(ctx);
         crate::ui::draw_top_panel(self, ctx);
+        crate::ui::draw_pattern_browser(self, ctx);
 
         egui::CentralPanel::default()
             .frame(egui::Frame::default().fill(COLOR_BG))
