@@ -1,0 +1,15 @@
+{
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/home/nfraison/RustroverProjects/newlife/.claude/hooks/check-docs.sh"
+          }
+        ]
+      }
+    ]
+  }
+}
