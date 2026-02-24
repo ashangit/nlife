@@ -33,6 +33,20 @@ highest to lowest impact / easiest to hardest.
   `add_left % 64` bits and OR-ing with the neighbouring word, reducing the copy to
   O(H × wpr) word operations — up to 64× fewer iterations.
 
+- [ ] **Replace frontier `HashSet` with `FxHashSet`** — profiling shows ~48 % of CPU is
+  spent on `HashSet<(usize, usize)>` hashing via SipHash-13 (`add_neighborhood` 19.6 %,
+  `hash_one` 14.1 %, `Hasher::write` 10.4 %).  Switching to `FxHashSet` from the
+  `rustc-hash` crate (multiplicative hash, ~3 ns vs ~15 ns per lookup for integer keys)
+  is a 2-line change (`Cargo.toml` + type alias) and should give a ~2–3× speedup on the
+  frontier-heavy hot path.
+
+- [ ] **HashLife algorithm** — implement the quadtree-based HashLife algorithm
+  (see <https://johnhw.github.io/hashlife/index.md.html>) for O(log N) amortised steps per
+  generation on periodic or highly-repetitive patterns.  HashLife memoises 2^k × 2^k
+  quadtree nodes by content hash, enabling exponential time-leaps; it is the standard
+  algorithm for long-running complex patterns such as guns, methuselahs, and
+  self-replicators where the current SWAR frontier approach scales linearly.
+
 ---
 
 ## 2. Performance — Pattern Browser
@@ -87,3 +101,21 @@ highest to lowest impact / easiest to hardest.
 
 - [ ] **Smooth zoom animation** — interpolate `cell_size` toward a target value over a
   few frames instead of applying it instantly, giving a polished feel.
+
+---
+
+## 5. Pattern Format / Metadata
+
+- [ ] **Parse `#C` / `#O` comment lines from RLE files** — the RLE format uses `#C text`
+  for a description and `#O author` for attribution.  Currently `parse_rle` silently skips
+  all `#` lines.  Extract these into `LibraryEntry` fields (e.g. `description: Option<String>`,
+  `author: Option<String>`) and display them as a tooltip or info panel in the pattern
+  browser so users know what each pattern does and who created it.
+
+- [ ] **Respect the `rule = …` field in RLE headers** — the `x = N, y = M, rule = B3/S23`
+  header line is currently skipped entirely by `parse_rle`.  The `rule` field encodes
+  birth/survival conditions in Golly's B/S notation (e.g. `B36/S23` for HighLife,
+  `B368/S245` for Move).  Parsing it would let the app warn the user when a loaded pattern
+  targets a non-standard rule and will not behave as described under the default B3/S23
+  simulation.  The `x` / `y` bounding-box values can also be used to pre-size the
+  `Vec<(i32, i32)>` returned by the parser (minor allocation win).
