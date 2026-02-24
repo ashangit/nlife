@@ -51,6 +51,24 @@ impl Simulation {
         self.time_since_last_step = 0.0;
     }
 
+    /// Loads centred cell offsets as the new grid state, resets the generation
+    /// counter, and stops the simulation.
+    ///
+    /// This is the library-entry counterpart of [`load_pattern`].  The `cells`
+    /// slice is passed directly to [`Grid::set_cells`], which centres the
+    /// pattern at `(height/2, width/2)`.
+    ///
+    /// # Arguments
+    /// * `cells` — centred `(row_offset, col_offset)` pairs as returned by
+    ///   `decoded_library()` or `center_cells()`
+    #[allow(dead_code)]
+    pub(crate) fn load_cells(&mut self, cells: &[(i32, i32)]) {
+        self.grid.set_cells(cells);
+        self.generation = 0;
+        self.running = false;
+        self.time_since_last_step = 0.0;
+    }
+
     /// Clears the grid, resets the generation counter, and stops the simulation.
     pub(crate) fn clear(&mut self) {
         self.grid.clear();

@@ -401,6 +401,31 @@ impl Grid {
         }
     }
 
+    /// Clears the grid and places `cells` (already-centred offsets) at the grid centre.
+    ///
+    /// Equivalent to [`set_pattern`] but accepts arbitrary `(row_offset, col_offset)`
+    /// pairs instead of a [`Pattern`] enum value.  Offsets are added to
+    /// `(height/2, width/2)` and cells that fall outside the grid bounds are
+    /// silently skipped.  `live_bbox` and `frontier` are rebuilt from the
+    /// placed cells via repeated [`set`] calls.
+    ///
+    /// # Arguments
+    /// * `cells` — centred `(row_offset, col_offset)` pairs, e.g. from
+    ///   `decoded_library()` or `center_cells()`
+    #[allow(dead_code)]
+    pub fn set_cells(&mut self, cells: &[(i32, i32)]) {
+        self.clear();
+        let origin_row = (self.height / 2) as i32;
+        let origin_col = (self.width / 2) as i32;
+        for &(dr, dc) in cells {
+            let r = origin_row + dr;
+            let c = origin_col + dc;
+            if r >= 0 && c >= 0 && (r as usize) < self.height && (c as usize) < self.width {
+                self.set(r as usize, c as usize, true);
+            }
+        }
+    }
+
     /// Checks all four edges for live cells and, for each edge that has one,
     /// adds `MARGIN` dead rows/columns on that side.  The cells buffer is
     /// rebuilt in place.
