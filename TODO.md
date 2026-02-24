@@ -33,13 +33,6 @@ highest to lowest impact / easiest to hardest.
   `add_left % 64` bits and OR-ing with the neighbouring word, reducing the copy to
   O(H × wpr) word operations — up to 64× fewer iterations.
 
-- [ ] **Replace frontier `HashSet` with `FxHashSet`** — profiling shows ~48 % of CPU is
-  spent on `HashSet<(usize, usize)>` hashing via SipHash-13 (`add_neighborhood` 19.6 %,
-  `hash_one` 14.1 %, `Hasher::write` 10.4 %).  Switching to `FxHashSet` from the
-  `rustc-hash` crate (multiplicative hash, ~3 ns vs ~15 ns per lookup for integer keys)
-  is a 2-line change (`Cargo.toml` + type alias) and should give a ~2–3× speedup on the
-  frontier-heavy hot path.
-
 - [ ] **HashLife algorithm** — implement the quadtree-based HashLife algorithm
   (see <https://johnhw.github.io/hashlife/index.md.html>) for O(log N) amortised steps per
   generation on periodic or highly-repetitive patterns.  HashLife memoises 2^k × 2^k

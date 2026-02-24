@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use rustc_hash::FxHashSet;
 
 /// Dead-cell margin added on each side when the grid expands.
 const MARGIN: usize = 20;
@@ -42,7 +42,7 @@ fn set_bit(cells: &mut [u64], words_per_row: usize, row: usize, col: usize, aliv
 /// * `row`, `col`     — centre cell
 /// * `width`, `height` — grid dimensions (for bounds checking)
 fn add_neighborhood(
-    frontier: &mut HashSet<(usize, usize)>,
+    frontier: &mut FxHashSet<(usize, usize)>,
     row: usize,
     col: usize,
     width: usize,
@@ -181,10 +181,10 @@ pub struct Grid {
     pub live_bbox: Option<[usize; 4]>,
     /// Per-cell set of candidates for the next step: every cell that is alive
     /// or adjacent to a live cell.  Updated from newly-alive cells after each step.
-    frontier: HashSet<(usize, usize)>,
+    frontier: FxHashSet<(usize, usize)>,
     /// `(row, word_index)` pairs written to `next` in the most recent step.
     /// Zeroed at the start of the following step to clear stale double-buffer values.
-    prev_written_words: HashSet<(usize, usize)>,
+    prev_written_words: FxHashSet<(usize, usize)>,
 }
 
 impl Grid {
@@ -203,8 +203,8 @@ impl Grid {
             cells: vec![0u64; n],
             next: vec![0u64; n],
             live_bbox: None,
-            frontier: HashSet::new(),
-            prev_written_words: HashSet::new(),
+            frontier: FxHashSet::default(),
+            prev_written_words: FxHashSet::default(),
         }
     }
 
@@ -286,7 +286,8 @@ impl Grid {
         let wpr = self.words_per_row;
 
         // Map per-cell frontier to (row, word_index) pairs.
-        let mut word_set: HashSet<(usize, usize)> = HashSet::with_capacity(self.frontier.len());
+        let mut word_set: FxHashSet<(usize, usize)> =
+            FxHashSet::with_capacity_and_hasher(self.frontier.len(), Default::default());
         for &(row, col) in &self.frontier {
             word_set.insert((row, col / 64));
         }
@@ -300,7 +301,7 @@ impl Grid {
         }
 
         // Evaluate each word in the frontier using the SWAR kernel.
-        let mut new_frontier: HashSet<(usize, usize)> = HashSet::new();
+        let mut new_frontier: FxHashSet<(usize, usize)> = FxHashSet::default();
         let mut new_live_bbox: Option<[usize; 4]> = None;
 
         for &(row, wi) in &word_set {
