@@ -5,6 +5,65 @@ highest to lowest impact / easiest to hardest.
 
 ---
 
+## 1. Performance — Simulation Engine
+
+- [ ] **Word-level frontier** — `frontier` currently stores per-cell `(row, col)` pairs and
+  rebuilds a `HashSet<(row, word_index)>` inside `step()` every generation.  Maintaining
+  the frontier directly at word granularity eliminates this per-step conversion and shrinks
+  the set size up to 64×.  The frontier would store `(row, wi)` triples and pre-expand to
+  include the three adjacent word columns (wi-1, wi, wi+1) for each active row, matching
+  exactly the 3×3 word neighbourhood read by `step_word`.
+
+- [ ] **Rayon parallel step loop** — the inner loop `for &(row, wi) in &word_set { … }`
+  in `step()` is embarrassingly parallel: each word depends only on its 8 neighbours from
+  the *previous* generation (`self.cells`, read-only) and writes to a distinct slot in
+  `self.next`.  Switching to `word_set.par_iter()` with Rayon would give near-linear
+  speedup for large patterns (guns, large methuselahs).  The `new_frontier` accumulation
+  would need a `Mutex<HashSet>` or a per-thread staging vec merged at the end.
+
+- [ ] **Replace HashSet with sorted Vec for frontier** — `HashSet<(usize, usize)>` has poor
+  cache locality due to bucket pointer-chasing.  The frontier entries are spatially
+  correlated (clustered around live regions), so a `Vec<(usize, usize)>` that is sorted
+  and deduped after each step would be more cache-friendly and cheaper to iterate.  Profile
+  first to confirm this is a net win over the amortised O(1) hash insertions.
+
+- [ ] **Word-copy in `expand_if_needed`** — the expansion loop copies cells via individual
+  `get_bit` / `set_bit` calls (O(W × H) iterations).  The new grid is a bit-shifted
+  version of the old one: each row can be copied by shifting whole `u64` words left by
+  `add_left % 64` bits and OR-ing with the neighbouring word, reducing the copy to
+  O(H × wpr) word operations — up to 64× fewer iterations.
+
+---
+
+## 2. Performance — Pattern Browser
+
+- [ ] **Virtual scrolling** — all matching patterns (potentially 1 000+) are currently
+  allocated in the egui layout every frame, even when only ~10 rows are visible.  Replace
+  the inner `for` loops with `egui::ScrollArea::show_rows(row_height, total_rows, |ui, range| { … })`
+  so egui only invokes the closure for the visible row range.  This requires knowing the
+  total filtered count and mapping row indices back to library entries, so build a
+  `Vec<BrowserRow>` index (built-in + custom, post-filter) once per filter change.
+
+- [ ] **Cached preview images** — `draw_preview()` recomputes the bounding box, scale
+  factor, and origin for every visible pattern on every frame, then issues O(live_cells)
+  `painter.rect_filled` calls.  Pre-render each pattern to an `egui::ColorImage` (40×40
+  RGBA) once, upload it as a retained `egui::TextureHandle` (stored in a
+  `HashMap<String, TextureHandle>` on `GameOfLifeApp`), and display with a single
+  `ui.image()` call.  Cache invalidation: re-render when user patterns change.
+
+- [ ] **Pre-filtered index with change detection** — the browser re-filters the full library
+  on every frame by iterating all entries and checking category + name.  Instead, cache a
+  `Vec<usize>` of matching indices and only recompute it when `browser_category` or
+  `browser_search` change (compare against the values used to build the last cache).  With
+  virtual scrolling this cache is the total-row count needed by `show_rows`.
+
+- [ ] **Lazy `decoded_library` access** — `decoded_library()` decodes all entries once into
+  a `Vec` via `OnceLock`, but the browser still walks the full slice.  Once virtual
+  scrolling + a pre-filtered index are in place, only O(visible_rows) entries will be
+  accessed per frame, so the remaining cost is dominated by the texture lookup, which is O(1).
+
+---
+
 ## 4. UI / UX Improvements
 
 - [ ] **Cell coordinate tooltip** — show `(row, col)` in a tooltip or status bar when
