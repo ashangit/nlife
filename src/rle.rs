@@ -1,11 +1,6 @@
-// Items used by library.rs; broader application usage wired in Item 3+.
-#![allow(dead_code)]
-
 /// Errors that can occur when parsing a Game of Life pattern file.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
-    /// The RLE header line is malformed or missing when one was expected.
-    InvalidHeader,
     /// An unexpected character was encountered in the pattern body.
     UnexpectedChar(char),
     /// The input contains no live cells (empty body or all-dead).
@@ -15,7 +10,6 @@ pub enum ParseError {
 impl std::fmt::Display for ParseError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            ParseError::InvalidHeader => write!(f, "invalid RLE header"),
             ParseError::UnexpectedChar(c) => write!(f, "unexpected character '{c}'"),
             ParseError::Empty => write!(f, "pattern is empty"),
         }

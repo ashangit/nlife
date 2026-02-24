@@ -1,7 +1,11 @@
 use crate::camera::Camera;
 use crate::library::Category;
+use crate::rle::load_user_patterns;
 use crate::simulation::Simulation;
 use crate::ui::COLOR_BG;
+
+/// Directory under `$HOME` where user-saved `.cells` pattern files are stored.
+const USER_PATTERNS_SUBDIR: &str = ".config/newlife/patterns";
 
 /// Main application state for the Conway's Game of Life desktop app.
 pub struct GameOfLifeApp {
@@ -16,18 +20,49 @@ pub struct GameOfLifeApp {
     pub(crate) browser_category: Option<Category>,
     /// Current text in the pattern browser name-search field.
     pub(crate) browser_search: String,
+    /// User-saved patterns loaded from `~/.config/newlife/patterns/`.
+    /// Each entry is `(name, centred_cells)`.
+    pub(crate) user_patterns: Vec<(String, Vec<(i32, i32)>)>,
+    /// Whether the "Save Pattern…" inline name popup is currently open.
+    pub(crate) save_popup_open: bool,
+    /// Text field value for the in-progress save-pattern name.
+    pub(crate) save_name: String,
 }
 
 impl GameOfLifeApp {
     /// Creates a new `GameOfLifeApp` with an empty grid and default settings.
+    ///
+    /// Loads user-saved patterns from `$HOME/.config/newlife/patterns/` on startup.
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        let user_patterns = user_patterns_dir()
+            .map(|dir| load_user_patterns(&dir))
+            .unwrap_or_default();
         Self {
             sim: Simulation::new(),
             camera: Camera::new(),
             drag_paint_state: None,
             browser_category: None,
             browser_search: String::new(),
+            user_patterns,
+            save_popup_open: false,
+            save_name: String::new(),
         }
+    }
+
+    /// Returns the absolute path to the user patterns directory and ensures it exists.
+    ///
+    /// Returns `None` if `$HOME` is not set or the directory cannot be created.
+    pub(crate) fn ensure_user_patterns_dir() -> Option<String> {
+        let dir = user_patterns_dir()?;
+        std::fs::create_dir_all(&dir).ok()?;
+        Some(dir)
+    }
+
+    /// Rescans the user patterns directory and refreshes `user_patterns`.
+    pub(crate) fn reload_user_patterns(&mut self) {
+        self.user_patterns = user_patterns_dir()
+            .map(|dir| load_user_patterns(&dir))
+            .unwrap_or_default();
     }
 
     /// Advances the simulation by as many steps as `dt` seconds warrant at the current speed,
@@ -41,6 +76,16 @@ impl GameOfLifeApp {
         self.camera.apply_expansion(t, l);
         ctx.request_repaint();
     }
+}
+
+// ── Private helpers ───────────────────────────────────────────────────────────
+
+/// Returns the path `$HOME/.config/newlife/patterns` as a `String`, or `None`
+/// if the `HOME` environment variable is not set.
+fn user_patterns_dir() -> Option<String> {
+    std::env::var("HOME")
+        .ok()
+        .map(|home| format!("{home}/{USER_PATTERNS_SUBDIR}"))
 }
 
 impl eframe::App for GameOfLifeApp {

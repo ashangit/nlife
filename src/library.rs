@@ -1,6 +1,3 @@
-// Items here are unused until the pattern-browser UI (Item 3) wires them in.
-#![allow(dead_code)]
-
 use std::sync::OnceLock;
 
 use crate::rle::{center_cells, parse_rle};
@@ -16,6 +13,8 @@ pub enum Category {
     Spaceship,
     /// Patterns that take a large number of generations to stabilise.
     Methuselah,
+    /// User-saved patterns loaded from `~/.config/newlife/patterns/`.
+    Custom,
 }
 
 /// A single entry in the built-in pattern library.
