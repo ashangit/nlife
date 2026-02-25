@@ -3,6 +3,14 @@ use rayon::prelude::*;
 /// Dead-cell margin added on each side when the grid expands.
 const MARGIN: usize = 20;
 
+/// Minimum word-level frontier size at which Rayon parallel evaluation pays off.
+///
+/// Below this the thread-pool wakeup cost (~37 µs measured) exceeds the
+/// parallelism gain; above it each additional word contributes ~2 ns of saved
+/// compute time per thread.  Break-even ≈ 37 000 ns / (8 ns × (1 − 1/threads))
+/// ≈ 6 200 words at 4 threads; 4 000 chosen conservatively.
+const RAYON_THRESHOLD: usize = 4_000;
+
 // ── Bit-manipulation helpers ──────────────────────────────────────────────────
 
 /// Returns `true` if the bit at `(row, col)` is set in the bit-packed slice.
@@ -367,8 +375,9 @@ impl Grid {
     /// - **Double-buffer**: writes to `next` and swaps — no heap allocation.
     /// - **Merge-scan zeroing**: stale `next` entries cleared via a single sorted
     ///   merge pass over `prev_written` and `frontier` — no hashing required.
-    /// - **Rayon parallel evaluation**: `compute_word` is called concurrently for
-    ///   each frontier entry via `par_iter`; results are applied sequentially.
+    /// - **Adaptive Rayon**: `compute_word` called via `par_iter` when
+    ///   `frontier.len() ≥ RAYON_THRESHOLD` (4 000 words); sequential `iter` otherwise,
+    ///   avoiding the ~37 µs thread-pool wakeup cost on small/medium patterns.
     pub fn step(&mut self) {
         if self.frontier.is_empty() {
             return;
@@ -393,14 +402,20 @@ impl Grid {
             }
         }
 
-        // Parallel evaluation phase: reads only &self.cells (Send + Sync).
-        // Each (row, wi, new_word) tuple is independent — no shared writes.
+        // Evaluation: parallel above RAYON_THRESHOLD, sequential below.
+        // Reads only &self.cells (Send + Sync); no aliasing with self.next.
         let cells = &self.cells;
-        let results: Vec<(usize, usize, u64)> = self
-            .frontier
-            .par_iter()
-            .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height)))
-            .collect();
+        let results: Vec<(usize, usize, u64)> = if self.frontier.len() >= RAYON_THRESHOLD {
+            self.frontier
+                .par_iter()
+                .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height)))
+                .collect()
+        } else {
+            self.frontier
+                .iter()
+                .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height)))
+                .collect()
+        };
 
         // Sequential apply: write results to self.next, build new_frontier and live_bbox.
         let mut new_frontier: Vec<(usize, usize)> = Vec::new();
