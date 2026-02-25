@@ -16,27 +16,3 @@ highest to lowest impact / easiest to hardest.
 
 ---
 
-## 4. UI / UX Improvements
-
-- [ ] **Cell coordinate tooltip** — show `(row, col)` in a tooltip or status bar when
-  hovering over the grid.
-
-- [ ] **Population counter & live-cell history graph** — display the current live-cell
-  count next to the generation counter; optionally plot the last N values as a
-  sparkline.
-
-- [ ] **Grid lines toggle** — keyboard shortcut `G` or a checkbox to draw grid lines
-  between cells at higher zoom levels.
-
-- [ ] **Keyboard shortcut cheat-sheet** — pressing `?` or `F1` opens a modal overlay
-  listing all key bindings.
-
-- [ ] **Save / load custom grids** — serialise the current grid state (e.g. as `.cells`
-  plaintext) and restore it from disk. Use `rfd` for a native file-picker dialog.
-
-- [ ] **Random fill** — a "Random" button that seeds the grid with a configurable density
-  (0–100 %, default 30 %) of randomly alive cells.
-
-- [ ] **Smooth zoom animation** — interpolate `cell_size` toward a target value over a
-  few frames instead of applying it instantly, giving a polished feel.
-
