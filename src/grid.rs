@@ -1,5 +1,3 @@
-use rustc_hash::FxHashSet;
-
 /// Dead-cell margin added on each side when the grid expands.
 const MARGIN: usize = 20;
 
@@ -34,27 +32,30 @@ fn set_bit(cells: &mut [u64], words_per_row: usize, row: usize, col: usize, aliv
     }
 }
 
-/// Inserts every cell in the 3×3 neighbourhood of `(row, col)` into `frontier`,
-/// clamping to the grid bounds given by `width` and `height`.
+/// Pushes the 3×3 word neighbourhood of `(row, wi)` into `frontier` (unsorted).
+///
+/// Clamps to grid bounds.  Duplicates are tolerated — `step()` deduplicates
+/// lazily via `sort_unstable` + `dedup` at the start of each generation.
 ///
 /// # Arguments
-/// * `frontier`       — destination set
-/// * `row`, `col`     — centre cell
-/// * `width`, `height` — grid dimensions (for bounds checking)
-fn add_neighborhood(
-    frontier: &mut FxHashSet<(usize, usize)>,
+/// * `frontier` — destination vec (word-level `(row, wi)` pairs)
+/// * `row`, `wi` — centre word coordinates
+/// * `wpr`       — words per row
+/// * `height`    — grid height in rows
+fn add_word_neighborhood(
+    frontier: &mut Vec<(usize, usize)>,
     row: usize,
-    col: usize,
-    width: usize,
+    wi: usize,
+    wpr: usize,
     height: usize,
 ) {
-    for dr in [-1i32, 0, 1] {
-        for dc in [-1i32, 0, 1] {
-            let r = row as i32 + dr;
-            let c = col as i32 + dc;
-            if r >= 0 && c >= 0 && (r as usize) < height && (c as usize) < width {
-                frontier.insert((r as usize, c as usize));
-            }
+    let r_start = if row > 0 { row - 1 } else { row };
+    let r_end = if row + 1 < height { row + 1 } else { row };
+    let w_start = if wi > 0 { wi - 1 } else { wi };
+    let w_end = if wi + 1 < wpr { wi + 1 } else { wi };
+    for r in r_start..=r_end {
+        for w in w_start..=w_end {
+            frontier.push((r, w));
         }
     }
 }
@@ -158,13 +159,14 @@ fn step_word(ap: u64, a: u64, an: u64, cp: u64, c: u64, cn: u64, bp: u64, b: u64
 /// A pre-allocated `next` scratch buffer avoids heap allocation per step.
 /// After computing the new generation, the two buffers are swapped.
 ///
-/// ## Active-cell frontier + SWAR neighbour counting
-/// `frontier` holds every cell that is alive or adjacent to a live cell.
-/// `step()` maps these to `(row, word_index)` pairs, then calls `step_word`
-/// which uses SWAR bitwise arithmetic to evaluate all 64 positions in a word
-/// simultaneously — replacing 64 individual `count_neighbors` calls with
-/// ~30 bitwise operations.  `prev_written_words` tracks which words were
-/// written to `next` last step so stale values can be zeroed efficiently.
+/// ## Word-level frontier + SWAR neighbour counting
+/// `frontier` is a sorted `Vec<(row, wi)>` covering every word that contains a
+/// live cell or is adjacent to one.  `step()` deduplicates it lazily, then
+/// calls `step_word` which uses SWAR bitwise arithmetic to evaluate all 64
+/// positions in a word simultaneously — replacing 64 individual
+/// `count_neighbors` calls with ~30 bitwise operations.  `prev_written` tracks
+/// which words were written to `next` last step so stale values can be zeroed
+/// efficiently via a merge-scan (no hashing).
 pub struct Grid {
     /// Number of columns.
     pub width: usize,
@@ -179,12 +181,14 @@ pub struct Grid {
     /// Tight bounding box of live cells: `[row_min, col_min, row_max, col_max]`
     /// (all inclusive).  `None` when the grid is empty.  Used by the renderer.
     pub live_bbox: Option<[usize; 4]>,
-    /// Per-cell set of candidates for the next step: every cell that is alive
-    /// or adjacent to a live cell.  Updated from newly-alive cells after each step.
-    frontier: FxHashSet<(usize, usize)>,
+    /// Per-word candidates for the next step: sorted `(row, wi)` pairs covering
+    /// every word that contains a live cell or is adjacent to one.  Sorted and
+    /// deduplicated lazily at the start of `step()`.
+    frontier: Vec<(usize, usize)>,
     /// `(row, word_index)` pairs written to `next` in the most recent step.
-    /// Zeroed at the start of the following step to clear stale double-buffer values.
-    prev_written_words: FxHashSet<(usize, usize)>,
+    /// Zeroed at the start of the following step via merge-scan to clear stale
+    /// double-buffer values.
+    prev_written: Vec<(usize, usize)>,
 }
 
 impl Grid {
@@ -203,8 +207,8 @@ impl Grid {
             cells: vec![0u64; n],
             next: vec![0u64; n],
             live_bbox: None,
-            frontier: FxHashSet::default(),
-            prev_written_words: FxHashSet::default(),
+            frontier: Vec::new(),
+            prev_written: Vec::new(),
         }
     }
 
@@ -229,7 +233,13 @@ impl Grid {
             if alive {
                 self.include_in_bbox(row, col);
             }
-            add_neighborhood(&mut self.frontier, row, col, self.width, self.height);
+            add_word_neighborhood(
+                &mut self.frontier,
+                row,
+                col / 64,
+                self.words_per_row,
+                self.height,
+            );
         }
     }
 
@@ -249,7 +259,13 @@ impl Grid {
             if new_alive {
                 self.include_in_bbox(row, col);
             }
-            add_neighborhood(&mut self.frontier, row, col, self.width, self.height);
+            add_word_neighborhood(
+                &mut self.frontier,
+                row,
+                col / 64,
+                self.words_per_row,
+                self.height,
+            );
         }
     }
 
@@ -260,7 +276,7 @@ impl Grid {
         self.next.fill(0);
         self.live_bbox = None;
         self.frontier.clear();
-        self.prev_written_words.clear();
+        self.prev_written.clear();
     }
 
     /// Advances the simulation by one generation using Conway's rules:
@@ -271,12 +287,15 @@ impl Grid {
     /// Out-of-bounds neighbours are treated as dead (finite, non-wrapping boundary).
     ///
     /// ## Optimisations
-    /// - **Active-cell frontier**: only words that contain a frontier cell are
-    ///   evaluated — `O(live + border)` amortised.
+    /// - **Word-level frontier**: `frontier` is a sorted `Vec<(row, wi)>` covering
+    ///   every word that contains or is adjacent to a live cell — O(live + border).
+    ///   Deduplicated lazily via `sort_unstable` + `dedup` at the start of each step.
     /// - **SWAR neighbour counting**: `step_word` evaluates 64 cells per ~30
     ///   bitwise operations instead of 64 individual neighbour-count loops.
     /// - **Bit-packed storage**: 8× less memory; improved cache utilisation.
     /// - **Double-buffer**: writes to `next` and swaps — no heap allocation.
+    /// - **Merge-scan zeroing**: stale `next` entries cleared via a single sorted
+    ///   merge pass over `prev_written` and `frontier` — no hashing required.
     pub fn step(&mut self) {
         if self.frontier.is_empty() {
             return;
@@ -285,26 +304,27 @@ impl Grid {
         let height = self.height;
         let wpr = self.words_per_row;
 
-        // Map per-cell frontier to (row, word_index) pairs.
-        let mut word_set: FxHashSet<(usize, usize)> =
-            FxHashSet::with_capacity_and_hasher(self.frontier.len(), Default::default());
-        for &(row, col) in &self.frontier {
-            word_set.insert((row, col / 64));
-        }
+        // Normalise the word-level frontier: sort and deduplicate in-place.
+        self.frontier.sort_unstable();
+        self.frontier.dedup();
 
         // Zero words written last step that won't be overwritten this step.
-        // This clears stale double-buffer values from two generations ago.
-        for &(row, wi) in &self.prev_written_words {
-            if !word_set.contains(&(row, wi)) {
+        // Merge-scan over two sorted lists; O(|prev_written| + |frontier|).
+        let mut fi = 0usize;
+        for &(row, wi) in &self.prev_written {
+            while fi < self.frontier.len() && self.frontier[fi] < (row, wi) {
+                fi += 1;
+            }
+            if fi >= self.frontier.len() || self.frontier[fi] != (row, wi) {
                 self.next[row * wpr + wi] = 0;
             }
         }
 
         // Evaluate each word in the frontier using the SWAR kernel.
-        let mut new_frontier: FxHashSet<(usize, usize)> = FxHashSet::default();
+        let mut new_frontier: Vec<(usize, usize)> = Vec::new();
         let mut new_live_bbox: Option<[usize; 4]> = None;
 
-        for &(row, wi) in &word_set {
+        for &(row, wi) in &self.frontier {
             // Read the 3×3 word neighbourhood from the current cells buffer.
             let ap = if row > 0 && wi > 0 {
                 self.cells[(row - 1) * wpr + wi - 1]
@@ -357,7 +377,12 @@ impl Grid {
 
             self.next[row * wpr + wi] = new_word;
 
-            // Extract alive bit positions and build the next frontier.
+            // Build word-level next frontier: one neighbourhood push per non-zero word.
+            if new_word != 0 {
+                add_word_neighborhood(&mut new_frontier, row, wi, wpr, height);
+            }
+
+            // Extract alive bit positions for live_bbox only.
             let mut bits = new_word;
             while bits != 0 {
                 let b_pos = bits.trailing_zeros() as usize;
@@ -368,14 +393,14 @@ impl Grid {
                         [rmin.min(row), cmin.min(col), rmax.max(row), cmax.max(col)]
                     }
                 });
-                add_neighborhood(&mut new_frontier, row, col, width, height);
                 bits &= bits - 1; // clear lowest set bit
             }
         }
 
         std::mem::swap(&mut self.cells, &mut self.next);
         self.live_bbox = new_live_bbox;
-        self.prev_written_words = word_set;
+        // prev_written = words we just wrote; frontier = words to evaluate next step.
+        std::mem::swap(&mut self.prev_written, &mut self.frontier);
         self.frontier = new_frontier;
     }
 
@@ -446,14 +471,17 @@ impl Grid {
         }
         self.live_bbox = self.live_bbox.map(|b| shift(b, add_top, add_left));
 
+        // Shift frontier word entries: row indices shift by add_top, word indices
+        // by word_shift (= add_left / 64).  A uniform offset preserves sort order.
+        let word_shift = add_left / 64;
         self.frontier = self
             .frontier
             .iter()
-            .map(|&(r, c)| (r + add_top, c + add_left))
+            .map(|&(r, wi)| (r + add_top, wi + word_shift))
             .collect();
 
-        // next is freshly zeroed, so prev_written_words is irrelevant.
-        self.prev_written_words.clear();
+        // next is freshly zeroed, so prev_written is irrelevant.
+        self.prev_written.clear();
 
         (add_top, add_left)
     }
@@ -846,21 +874,29 @@ mod tests {
         let mut g = Grid::new(10, 10);
         assert!(g.frontier.is_empty(), "new grid frontier should be empty");
 
+        // Grid is 10×10 → wpr = 1.  After set(5, 5), add_word_neighborhood is
+        // called with (row=5, wi=0, wpr=1, height=10), which pushes rows {4,5,6}
+        // × word {0} = (4,0), (5,0), (6,0).
         g.set(5, 5, true);
         assert!(
             !g.frontier.is_empty(),
             "frontier should be non-empty after set"
         );
-        for dr in [-1i32, 0, 1] {
-            for dc in [-1i32, 0, 1] {
-                let r = (5i32 + dr) as usize;
-                let c = (5i32 + dc) as usize;
-                assert!(
-                    g.frontier.contains(&(r, c)),
-                    "({r},{c}) missing from frontier after set(5,5,true)"
-                );
-            }
-        }
+        let mut sorted = g.frontier.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert!(
+            sorted.contains(&(4, 0)),
+            "(4,0) missing from frontier after set(5,5,true)"
+        );
+        assert!(
+            sorted.contains(&(5, 0)),
+            "(5,0) missing from frontier after set(5,5,true)"
+        );
+        assert!(
+            sorted.contains(&(6, 0)),
+            "(6,0) missing from frontier after set(5,5,true)"
+        );
 
         g.clear();
         assert!(
