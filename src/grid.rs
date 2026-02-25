@@ -268,6 +268,12 @@ pub struct Grid {
     /// Zeroed at the start of the following step via merge-scan to clear stale
     /// double-buffer values.
     prev_written: Vec<(usize, usize)>,
+    /// Scratch buffer for per-step SWAR results; cleared and reused each step
+    /// to avoid a heap allocation on every call to `step()`.
+    results_buf: Vec<(usize, usize, u64)>,
+    /// Scratch buffer for the next-generation frontier; cleared and reused each
+    /// step to avoid a heap allocation on every call to `step()`.
+    next_frontier: Vec<(usize, usize)>,
 }
 
 impl Grid {
@@ -288,6 +294,8 @@ impl Grid {
             live_bbox: None,
             frontier: Vec::new(),
             prev_written: Vec::new(),
+            results_buf: Vec::new(),
+            next_frontier: Vec::new(),
         }
     }
 
@@ -404,29 +412,34 @@ impl Grid {
 
         // Evaluation: parallel above RAYON_THRESHOLD, sequential below.
         // Reads only &self.cells (Send + Sync); no aliasing with self.next.
+        // results_buf is reused across calls to avoid a per-step heap allocation.
         let cells = &self.cells;
-        let results: Vec<(usize, usize, u64)> = if self.frontier.len() >= RAYON_THRESHOLD {
-            self.frontier
-                .par_iter()
-                .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height)))
-                .collect()
+        self.results_buf.clear();
+        if self.frontier.len() >= RAYON_THRESHOLD {
+            self.results_buf.par_extend(
+                self.frontier
+                    .par_iter()
+                    .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height))),
+            );
         } else {
-            self.frontier
-                .iter()
-                .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height)))
-                .collect()
-        };
+            self.results_buf.extend(
+                self.frontier
+                    .iter()
+                    .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height))),
+            );
+        }
 
-        // Sequential apply: write results to self.next, build new_frontier and live_bbox.
-        let mut new_frontier: Vec<(usize, usize)> = Vec::new();
+        // Sequential apply: write results to self.next, build next_frontier and live_bbox.
+        // next_frontier is reused across calls to avoid a per-step heap allocation.
+        self.next_frontier.clear();
         let mut new_live_bbox: Option<[usize; 4]> = None;
 
-        for &(row, wi, new_word) in &results {
+        for &(row, wi, new_word) in &self.results_buf {
             self.next[row * wpr + wi] = new_word;
 
             // Build word-level next frontier: one neighbourhood push per non-zero word.
             if new_word != 0 {
-                add_word_neighborhood(&mut new_frontier, row, wi, wpr, height);
+                add_word_neighborhood(&mut self.next_frontier, row, wi, wpr, height);
             }
 
             // Extract alive bit positions for live_bbox only.
@@ -448,7 +461,8 @@ impl Grid {
         self.live_bbox = new_live_bbox;
         // prev_written = words we just wrote; frontier = words to evaluate next step.
         std::mem::swap(&mut self.prev_written, &mut self.frontier);
-        self.frontier = new_frontier;
+        // Swap next_frontier into frontier (reuse its allocation next step).
+        std::mem::swap(&mut self.next_frontier, &mut self.frontier);
     }
 
     /// Clears the grid and places `cells` (already-centred offsets) at the grid centre.
