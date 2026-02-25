@@ -66,20 +66,3 @@ highest to lowest impact / easiest to hardest.
 - [ ] **Smooth zoom animation** — interpolate `cell_size` toward a target value over a
   few frames instead of applying it instantly, giving a polished feel.
 
----
-
-## 5. Pattern Format / Metadata
-
-- [ ] **Parse `#C` / `#O` comment lines from RLE files** — the RLE format uses `#C text`
-  for a description and `#O author` for attribution.  Currently `parse_rle` silently skips
-  all `#` lines.  Extract these into `LibraryEntry` fields (e.g. `description: Option<String>`,
-  `author: Option<String>`) and display them as a tooltip or info panel in the pattern
-  browser so users know what each pattern does and who created it.
-
-- [ ] **Respect the `rule = …` field in RLE headers** — the `x = N, y = M, rule = B3/S23`
-  header line is currently skipped entirely by `parse_rle`.  The `rule` field encodes
-  birth/survival conditions in Golly's B/S notation (e.g. `B36/S23` for HighLife,
-  `B368/S245` for Move).  Parsing it would let the app warn the user when a loaded pattern
-  targets a non-standard rule and will not behave as described under the default B3/S23
-  simulation.  The `x` / `y` bounding-box values can also be used to pre-size the
-  `Vec<(i32, i32)>` returned by the parser (minor allocation win).

@@ -1,1 +1,4 @@
+#C The R-pentomino is a methuselah that takes 1103 generations to stabilise.
+#C It produces 8 gliders during its lifespan.
+x = 3, y = 3, rule = B3/S23
 b2o$2o$bo!

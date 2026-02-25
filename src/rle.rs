@@ -1,3 +1,19 @@
+/// Metadata and cell list parsed from an RLE-encoded pattern.
+///
+/// Returned by [`parse_rle`]; callers access `.cells` for the live-cell list
+/// and the optional metadata fields for display or validation.
+#[derive(Debug, PartialEq, Eq)]
+pub struct ParsedRle {
+    /// Live-cell coordinates with the top-left at `(0, 0)`.
+    pub cells: Vec<(i32, i32)>,
+    /// Joined text from one or more `#C` comment lines (newline-separated).
+    pub description: Option<String>,
+    /// Author name from the `#O` comment line.
+    pub author: Option<String>,
+    /// Rule string from the `rule = …` header field (e.g. `"B3/S23"`), if present.
+    pub rule: Option<String>,
+}
+
 /// Errors that can occur when parsing a Game of Life pattern file.
 #[derive(Debug, PartialEq, Eq)]
 pub enum ParseError {
@@ -16,10 +32,13 @@ impl std::fmt::Display for ParseError {
     }
 }
 
-/// Parse an RLE-encoded Conway's Game of Life pattern into live cell coordinates.
+/// Parse an RLE-encoded Conway's Game of Life pattern into a [`ParsedRle`] containing
+/// live cell coordinates and extracted metadata.
 ///
-/// The top-left of the parsed bounding box is at `(0, 0)`. Optional `#` comment
-/// lines and an optional `x = N, y = M[, rule = …]` header line are silently skipped.
+/// The top-left of the parsed bounding box is at `(0, 0)`. `#C` comment lines are
+/// collected into `description`, the `#O` line into `author`, and the `rule = …`
+/// field of the header into `rule`.  The `x` and `y` dimensions in the header are
+/// used to pre-size the cells vector.
 ///
 /// Body tokens:
 /// - Digit prefix: repeat count for the next token (omitted = 1)
@@ -34,25 +53,37 @@ impl std::fmt::Display for ParseError {
 /// * `input` — raw RLE string (may include comment/header lines)
 ///
 /// # Returns
-/// `Ok(cells)` with `(row, col)` pairs (top-left = `(0, 0)`), or
+/// `Ok(ParsedRle)` with cells and optional metadata, or
 /// `Err(ParseError)` if the body is empty or contains illegal characters.
-pub fn parse_rle(input: &str) -> Result<Vec<(i32, i32)>, ParseError> {
+pub fn parse_rle(input: &str) -> Result<ParsedRle, ParseError> {
     let mut cells: Vec<(i32, i32)> = Vec::new();
     let mut row = 0i32;
     let mut col = 0i32;
     let mut count_acc = 0u32;
     let mut found_body = false;
+    let mut description_lines: Vec<String> = Vec::new();
+    let mut author: Option<String> = None;
+    let mut rule: Option<String> = None;
 
     for line in input.lines() {
         let trimmed = line.trim();
 
-        // Skip comment lines.
+        // Parse or skip comment lines.
         if trimmed.starts_with('#') {
+            if trimmed.starts_with("#C") || trimmed.starts_with("#c") {
+                description_lines.push(trimmed[2..].trim().to_owned());
+            } else if trimmed.starts_with("#O") || trimmed.starts_with("#o") {
+                author = Some(trimmed[2..].trim().to_owned());
+            }
             continue;
         }
 
-        // Skip the optional header line (`x = N, y = M[, rule = ...]`).
+        // Parse or skip the optional header line (`x = N, y = M[, rule = ...]`).
         if trimmed.to_ascii_lowercase().starts_with('x') && trimmed.contains('=') {
+            rule = parse_rule_from_header(trimmed);
+            if let Some(cap) = parse_header_capacity(trimmed) {
+                cells.reserve(cap);
+            }
             continue;
         }
 
@@ -87,7 +118,17 @@ pub fn parse_rle(input: &str) -> Result<Vec<(i32, i32)>, ParseError> {
                     if cells.is_empty() {
                         return Err(ParseError::Empty);
                     }
-                    return Ok(cells);
+                    let description = if description_lines.is_empty() {
+                        None
+                    } else {
+                        Some(description_lines.join("\n"))
+                    };
+                    return Ok(ParsedRle {
+                        cells,
+                        description,
+                        author,
+                        rule,
+                    });
                 }
                 ' ' | '\t' | '\r' => {
                     // Whitespace within a body line is allowed.
@@ -103,7 +144,72 @@ pub fn parse_rle(input: &str) -> Result<Vec<(i32, i32)>, ParseError> {
         return Err(ParseError::Empty);
     }
 
-    Ok(cells)
+    let description = if description_lines.is_empty() {
+        None
+    } else {
+        Some(description_lines.join("\n"))
+    };
+    Ok(ParsedRle {
+        cells,
+        description,
+        author,
+        rule,
+    })
+}
+
+/// Parses the `rule = …` value from an RLE header line.
+///
+/// # Arguments
+/// * `header` — the `x = N, y = M[, rule = …]` header line
+///
+/// # Returns
+/// `Some(rule_string)` if a non-empty `rule` field is found, otherwise `None`.
+fn parse_rule_from_header(header: &str) -> Option<String> {
+    let lower = header.to_ascii_lowercase();
+    let pos = lower.find("rule")?;
+    let after = &header[pos + 4..];
+    let eq = after.find('=')?;
+    let value = after[eq + 1..].trim().split(',').next()?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+/// Computes the product of the `x` and `y` dimension values from an RLE header.
+///
+/// Used to pre-size the cells `Vec` to avoid repeated reallocations for large patterns.
+///
+/// # Arguments
+/// * `header` — the `x = N, y = M[, …]` header line
+///
+/// # Returns
+/// `Some(x * y)` if both dimensions are present and parse successfully, otherwise `None`.
+fn parse_header_capacity(header: &str) -> Option<usize> {
+    Some(parse_header_dim(header, 'x')? * parse_header_dim(header, 'y')?)
+}
+
+/// Extracts the integer value of a named dimension (`x` or `y`) from an RLE header.
+///
+/// # Arguments
+/// * `header` — the `x = N, y = M[, …]` header line
+/// * `dim`    — the dimension character to extract (`'x'` or `'y'`)
+///
+/// # Returns
+/// `Some(value)` if the dimension is found and parses as a `usize`, otherwise `None`.
+fn parse_header_dim(header: &str, dim: char) -> Option<usize> {
+    let lower = header.to_ascii_lowercase();
+    let pos = lower.find(dim)?;
+    let after = &header[pos + 1..];
+    let eq = after.find('=')?;
+    after[eq + 1..]
+        .trim()
+        .split(',')
+        .next()?
+        .trim()
+        .parse::<usize>()
+        .ok()
 }
 
 /// Parse a `.cells` plaintext Conway's Game of Life pattern into live cell coordinates.
@@ -271,7 +377,7 @@ mod tests {
     #[test]
     fn test_parse_rle_glider() {
         let rle = "x = 3, y = 3, rule = B3/S23\nbo$2bo$3o!";
-        let cells = parse_rle(rle).expect("glider RLE should parse");
+        let cells = parse_rle(rle).expect("glider RLE should parse").cells;
         assert_eq!(cells.len(), 5, "glider has 5 live cells");
         // Canonical glider relative to top-left=(0,0):
         // (0,1), (1,2), (2,0), (2,1), (2,2)
@@ -333,8 +439,32 @@ mod tests {
     #[test]
     fn test_parse_rle_with_comments() {
         let rle = "# Comment line\n# Another comment\nx = 2, y = 2\n2o$\n2o!";
-        let cells = parse_rle(rle).expect("2×2 block RLE should parse");
+        let cells = parse_rle(rle).expect("2×2 block RLE should parse").cells;
         assert_eq!(cells.len(), 4);
+    }
+
+    /// parse_rle extracts joined #C lines into description.
+    #[test]
+    fn test_parse_rle_extracts_description() {
+        let rle = "#C First line\n#C Second line\nbo$2bo$3o!";
+        let p = parse_rle(rle).unwrap();
+        assert_eq!(p.description.as_deref(), Some("First line\nSecond line"));
+    }
+
+    /// parse_rle extracts the #O line into author.
+    #[test]
+    fn test_parse_rle_extracts_author() {
+        let rle = "#O Richard K. Guy\nbo$2bo$3o!";
+        let p = parse_rle(rle).unwrap();
+        assert_eq!(p.author.as_deref(), Some("Richard K. Guy"));
+    }
+
+    /// parse_rle extracts the rule field from the header.
+    #[test]
+    fn test_parse_rle_extracts_rule() {
+        let rle = "x = 3, y = 3, rule = B3/S23\nbo$2bo$3o!";
+        let p = parse_rle(rle).unwrap();
+        assert_eq!(p.rule.as_deref(), Some("B3/S23"));
     }
 
     /// parse_cells skips comment lines starting with '!'.

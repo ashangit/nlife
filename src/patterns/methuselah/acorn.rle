@@ -1,1 +1,5 @@
+#C Acorn is a methuselah that takes 5206 generations to stabilise.
+#C It produces 633 cells, 13 gliders, and various still lifes and oscillators.
+#O Charles Corderman
+x = 7, y = 3, rule = B3/S23
 bo$3bo$2o2b3o!

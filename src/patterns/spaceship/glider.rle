@@ -1,1 +1,5 @@
+#C The glider is the smallest and most common spaceship in Game of Life.
+#C It was discovered by Richard K. Guy in 1969.
+#O Richard K. Guy
+x = 3, y = 3, rule = B3/S23
 bo$2bo$3o!

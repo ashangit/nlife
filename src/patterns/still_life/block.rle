@@ -1,1 +1,3 @@
+#C The block is the simplest and most common still life in Game of Life.
+x = 2, y = 2, rule = B3/S23
 2o$2o!

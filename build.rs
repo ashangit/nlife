@@ -62,8 +62,14 @@ fn main() {
             // Escape backslashes and double-quotes for a Rust string literal.
             let escaped = content.replace('\\', "\\\\").replace('"', "\\\"");
 
+            let (description, author, rule) = extract_metadata(&content);
+            let desc_lit = opt_str_literal(description.as_deref());
+            let auth_lit = opt_str_literal(author.as_deref());
+            let rule_lit = opt_str_literal(rule.as_deref());
+
             code.push_str(&format!(
-                "    LibraryEntry {{ name: \"{name}\", category: {category_expr}, rle: \"{escaped}\" }},\n"
+                "    LibraryEntry {{ name: \"{name}\", category: {category_expr}, rle: \"{escaped}\", \
+                 description: {desc_lit}, author: {auth_lit}, rule: {rule_lit} }},\n"
             ));
         }
     }
@@ -105,5 +111,75 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(c) => c.to_uppercase().to_string() + chars.as_str(),
+    }
+}
+
+/// Extracts description (joined `#C` lines), author (`#O`), and rule from raw RLE content.
+///
+/// # Arguments
+/// * `content` — raw text of an `.rle` file
+///
+/// # Returns
+/// A tuple `(description, author, rule)`, each `None` if the corresponding metadata
+/// is absent from the file.
+fn extract_metadata(content: &str) -> (Option<String>, Option<String>, Option<String>) {
+    let mut desc_lines: Vec<String> = Vec::new();
+    let mut author: Option<String> = None;
+    let mut rule: Option<String> = None;
+    for line in content.lines() {
+        let t = line.trim();
+        if t.starts_with("#C") || t.starts_with("#c") {
+            desc_lines.push(t[2..].trim().to_owned());
+        } else if t.starts_with("#O") || t.starts_with("#o") {
+            author = Some(t[2..].trim().to_owned());
+        } else if t.to_ascii_lowercase().starts_with('x') && t.contains('=') {
+            rule = parse_rule_from_header(t);
+        }
+    }
+    let description = if desc_lines.is_empty() {
+        None
+    } else {
+        Some(desc_lines.join("\n"))
+    };
+    (description, author, rule)
+}
+
+/// Parses the `rule = …` value from an RLE header line.
+///
+/// # Arguments
+/// * `header` — the `x = N, y = M[, rule = …]` header line
+///
+/// # Returns
+/// `Some(rule_string)` if a non-empty `rule` field is found, otherwise `None`.
+fn parse_rule_from_header(header: &str) -> Option<String> {
+    let lower = header.to_ascii_lowercase();
+    let pos = lower.find("rule")?;
+    let after = &header[pos + 4..];
+    let eq = after.find('=')?;
+    let value = after[eq + 1..].trim().split(',').next()?.trim();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value.to_owned())
+    }
+}
+
+/// Emits a Rust `Option<&'static str>` literal for a string value.
+///
+/// Backslashes and double-quotes in `s` are escaped; embedded newlines are kept
+/// as-is (valid in Rust string literals).
+///
+/// # Arguments
+/// * `s` — the optional string to render as a literal
+///
+/// # Returns
+/// `"None"` if `s` is `None`, or `Some("…")` with the value properly escaped.
+fn opt_str_literal(s: Option<&str>) -> String {
+    match s {
+        None => "None".to_owned(),
+        Some(v) => {
+            let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
+            format!("Some(\"{escaped}\")")
+        }
     }
 }

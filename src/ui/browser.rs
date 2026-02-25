@@ -120,17 +120,22 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
                     .auto_shrink([false; 2])
                     .show_rows(ui, PREVIEW_SIZE, entries.len(), |ui, row_range| {
                         for row_idx in row_range {
-                            let (name, cells, tex_key): (&str, &[(i32, i32)], String) =
-                                match &entries[row_idx] {
-                                    BrowserEntry::Library(i) => {
-                                        let (e, c) = &decoded_library()[*i];
-                                        (e.name, c.as_slice(), e.name.to_owned())
-                                    }
-                                    BrowserEntry::User(i) => {
-                                        let (n, c) = &user_patterns[*i];
-                                        (n.as_str(), c.as_slice(), format!("user:{n}"))
-                                    }
-                                };
+                            let (name, cells, tex_key, hover_text): (
+                                &str,
+                                &[(i32, i32)],
+                                String,
+                                Option<String>,
+                            ) = match &entries[row_idx] {
+                                BrowserEntry::Library(i) => {
+                                    let (e, c) = &decoded_library()[*i];
+                                    let hover = entry_hover_text(e.description, e.author, e.rule);
+                                    (e.name, c.as_slice(), e.name.to_owned(), hover)
+                                }
+                                BrowserEntry::User(i) => {
+                                    let (n, c) = &user_patterns[*i];
+                                    (n.as_str(), c.as_slice(), format!("user:{n}"), None)
+                                }
+                            };
                             let tex_id =
                                 get_or_create_texture(textures, ui.ctx(), &tex_key, cells).id();
                             ui.horizontal(|ui| {
@@ -142,7 +147,11 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
                                     Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
                                     Color32::WHITE,
                                 );
-                                if ui.button(name).clicked() {
+                                let mut btn = ui.button(name);
+                                if let Some(text) = &hover_text {
+                                    btn = btn.on_hover_text(text.as_str());
+                                }
+                                if btn.clicked() {
                                     to_load = Some(cells.to_vec());
                                 }
                             });
@@ -153,6 +162,53 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
                 app.sim.load_cells(&cells);
             }
         });
+}
+
+/// Builds a hover tooltip string for a library pattern entry.
+///
+/// Formats author (prefixed "Author: "), description, and a rule-mismatch
+/// warning for non-standard rules.  Returns `None` if there is nothing to show.
+///
+/// # Arguments
+/// * `description` — optional `#C` comment text (newline-separated)
+/// * `author`      — optional `#O` author name
+/// * `rule`        — optional rule string from the RLE header
+///
+/// # Returns
+/// `Some(tooltip)` if any metadata is present, `None` otherwise.
+fn entry_hover_text(
+    description: Option<&str>,
+    author: Option<&str>,
+    rule: Option<&str>,
+) -> Option<String> {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(auth) = author {
+        parts.push(format!("Author: {auth}"));
+    }
+    if let Some(desc) = description {
+        parts.push(desc.to_owned());
+    }
+    if let Some(r) = rule
+        && !is_standard_life_rule(r)
+    {
+        parts.push(format!("⚠ Rule: {r} (non-standard — behaviour may differ)"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
+/// Returns `true` if `rule` is a recognised spelling of the standard B3/S23 rule.
+///
+/// # Arguments
+/// * `rule` — rule string to check (case-insensitive)
+fn is_standard_life_rule(rule: &str) -> bool {
+    matches!(
+        rule.to_ascii_lowercase().as_str(),
+        "b3/s23" | "b3s23" | "23/3"
+    )
 }
 
 /// Extracts the current live cells, writes them as a `.cells` file, and
@@ -313,5 +369,30 @@ mod tests {
         assert_eq!(category_label(Some(Category::Methuselah)), "Methuselah");
         assert_eq!(category_label(Some(Category::Gun)), "Gun");
         assert_eq!(category_label(Some(Category::Custom)), "Custom");
+    }
+
+    /// entry_hover_text returns None when all metadata fields are absent.
+    #[test]
+    fn test_entry_hover_text_none() {
+        assert_eq!(entry_hover_text(None, None, None), None);
+    }
+
+    /// entry_hover_text includes author and description, and suppresses warning for B3/S23.
+    #[test]
+    fn test_entry_hover_text_with_metadata() {
+        let t = entry_hover_text(Some("A description"), Some("John"), Some("B3/S23")).unwrap();
+        assert!(t.contains("Author: John"));
+        assert!(t.contains("A description"));
+        assert!(!t.contains('⚠')); // standard rule — no warning
+    }
+
+    /// is_standard_life_rule recognises all B3/S23 spellings and rejects non-standard rules.
+    #[test]
+    fn test_is_standard_life_rule() {
+        assert!(is_standard_life_rule("B3/S23"));
+        assert!(is_standard_life_rule("b3/s23"));
+        assert!(is_standard_life_rule("b3s23"));
+        assert!(!is_standard_life_rule("B36/S23"));
+        assert!(!is_standard_life_rule("HighLife"));
     }
 }
