@@ -545,10 +545,15 @@ impl Grid {
     /// compensate its scroll offset.  `live_bbox` and `frontier` are shifted;
     /// `prev_written` is cleared (the fresh `next` buffer has no stale data).
     pub fn expand_if_needed(&mut self) -> (usize, usize) {
-        let top = (0..self.width).any(|c| self.get(0, c));
-        let bottom = (0..self.width).any(|c| self.get(self.height - 1, c));
-        let left = (0..self.height).any(|r| self.get(r, 0));
-        let right = (0..self.height).any(|r| self.get(r, self.width - 1));
+        // O(1) edge detection: live_bbox is maintained precisely by set()/toggle()
+        // and updated by step().  A conservative bbox never misses a live edge cell.
+        let Some([rmin, cmin, rmax, cmax]) = self.live_bbox else {
+            return (0, 0); // empty grid — nothing to do
+        };
+        let top = rmin == 0;
+        let bottom = rmax == self.height.saturating_sub(1);
+        let left = cmin == 0;
+        let right = cmax == self.width.saturating_sub(1);
 
         let add_top = if top { MARGIN } else { 0 };
         let add_bottom = if bottom { MARGIN } else { 0 };
@@ -1103,6 +1108,26 @@ mod tests {
             3,
             "blinker should still have 3 live cells after one step"
         );
+    }
+
+    #[test]
+    fn test_expand_fires_when_bbox_touches_edge() {
+        // A live cell at row 0 touches the top edge → expand_if_needed must
+        // prepend MARGIN rows and return (MARGIN, 0).
+        let mut g = Grid::new(100, 100);
+        g.set(0, 50, true);
+        let (add_top, add_left) = g.expand_if_needed();
+        assert_eq!(add_top, MARGIN, "expected MARGIN rows added at top");
+        assert_eq!(add_left, 0, "left edge untouched — no cols should be added");
+    }
+
+    #[test]
+    fn test_expand_no_fire_when_bbox_interior() {
+        // A live cell well away from all edges must not trigger any expansion.
+        let mut g = Grid::new(100, 100);
+        g.set(50, 50, true);
+        let result = g.expand_if_needed();
+        assert_eq!(result, (0, 0), "interior cell must not trigger expansion");
     }
 
     #[test]
