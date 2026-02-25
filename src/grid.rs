@@ -1,3 +1,5 @@
+use rayon::prelude::*;
+
 /// Dead-cell margin added on each side when the grid expands.
 const MARGIN: usize = 20;
 
@@ -142,6 +144,75 @@ fn step_word(ap: u64, a: u64, an: u64, cp: u64, c: u64, cn: u64, bp: u64, b: u64
     // ── Conway's rule: new = (n==3) | (alive & n==2)
     //                       = !bit2 & bit1 & (bit0 | alive)
     !s6 & s5 & (s3 | c)
+}
+
+// ── Per-word step helper ──────────────────────────────────────────────────────
+
+/// Reads the 3×3 word neighbourhood from `cells` and applies one step of
+/// Conway's rules via the SWAR kernel, returning the new alive word for
+/// position `(row, wi)`.
+///
+/// This free function is `Send + Sync`-safe (takes a shared slice reference)
+/// and is called from the Rayon parallel map in [`Grid::step`].
+///
+/// # Arguments
+/// * `cells`  — flat bit-packed row-major buffer (read-only, current generation)
+/// * `row`, `wi` — word coordinates of the target word
+/// * `wpr`    — words per row
+/// * `width`  — grid width in columns (for last-word masking)
+/// * `height` — grid height in rows (for boundary checks)
+fn compute_word(
+    cells: &[u64],
+    row: usize,
+    wi: usize,
+    wpr: usize,
+    width: usize,
+    height: usize,
+) -> u64 {
+    let ap = if row > 0 && wi > 0 {
+        cells[(row - 1) * wpr + wi - 1]
+    } else {
+        0
+    };
+    let a = if row > 0 {
+        cells[(row - 1) * wpr + wi]
+    } else {
+        0
+    };
+    let an = if row > 0 && wi + 1 < wpr {
+        cells[(row - 1) * wpr + wi + 1]
+    } else {
+        0
+    };
+    let cp = if wi > 0 { cells[row * wpr + wi - 1] } else { 0 };
+    let c = cells[row * wpr + wi];
+    let cn = if wi + 1 < wpr {
+        cells[row * wpr + wi + 1]
+    } else {
+        0
+    };
+    let bp = if row + 1 < height && wi > 0 {
+        cells[(row + 1) * wpr + wi - 1]
+    } else {
+        0
+    };
+    let b = if row + 1 < height {
+        cells[(row + 1) * wpr + wi]
+    } else {
+        0
+    };
+    let bn = if row + 1 < height && wi + 1 < wpr {
+        cells[(row + 1) * wpr + wi + 1]
+    } else {
+        0
+    };
+
+    let mut new_word = step_word(ap, a, an, cp, c, cn, bp, b, bn);
+    // Mask off unused high bits in the last word of each row.
+    if wi + 1 == wpr && !width.is_multiple_of(64) {
+        new_word &= (1u64 << (width % 64)) - 1;
+    }
+    new_word
 }
 
 // ── Grid ──────────────────────────────────────────────────────────────────────
@@ -296,6 +367,8 @@ impl Grid {
     /// - **Double-buffer**: writes to `next` and swaps — no heap allocation.
     /// - **Merge-scan zeroing**: stale `next` entries cleared via a single sorted
     ///   merge pass over `prev_written` and `frontier` — no hashing required.
+    /// - **Rayon parallel evaluation**: `compute_word` is called concurrently for
+    ///   each frontier entry via `par_iter`; results are applied sequentially.
     pub fn step(&mut self) {
         if self.frontier.is_empty() {
             return;
@@ -320,61 +393,20 @@ impl Grid {
             }
         }
 
-        // Evaluate each word in the frontier using the SWAR kernel.
+        // Parallel evaluation phase: reads only &self.cells (Send + Sync).
+        // Each (row, wi, new_word) tuple is independent — no shared writes.
+        let cells = &self.cells;
+        let results: Vec<(usize, usize, u64)> = self
+            .frontier
+            .par_iter()
+            .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height)))
+            .collect();
+
+        // Sequential apply: write results to self.next, build new_frontier and live_bbox.
         let mut new_frontier: Vec<(usize, usize)> = Vec::new();
         let mut new_live_bbox: Option<[usize; 4]> = None;
 
-        for &(row, wi) in &self.frontier {
-            // Read the 3×3 word neighbourhood from the current cells buffer.
-            let ap = if row > 0 && wi > 0 {
-                self.cells[(row - 1) * wpr + wi - 1]
-            } else {
-                0
-            };
-            let a = if row > 0 {
-                self.cells[(row - 1) * wpr + wi]
-            } else {
-                0
-            };
-            let an = if row > 0 && wi + 1 < wpr {
-                self.cells[(row - 1) * wpr + wi + 1]
-            } else {
-                0
-            };
-            let cp = if wi > 0 {
-                self.cells[row * wpr + wi - 1]
-            } else {
-                0
-            };
-            let c = self.cells[row * wpr + wi];
-            let cn = if wi + 1 < wpr {
-                self.cells[row * wpr + wi + 1]
-            } else {
-                0
-            };
-            let bp = if row + 1 < height && wi > 0 {
-                self.cells[(row + 1) * wpr + wi - 1]
-            } else {
-                0
-            };
-            let b = if row + 1 < height {
-                self.cells[(row + 1) * wpr + wi]
-            } else {
-                0
-            };
-            let bn = if row + 1 < height && wi + 1 < wpr {
-                self.cells[(row + 1) * wpr + wi + 1]
-            } else {
-                0
-            };
-
-            let mut new_word = step_word(ap, a, an, cp, c, cn, bp, b, bn);
-
-            // Mask off unused high bits in the last word of each row.
-            if wi + 1 == wpr && !width.is_multiple_of(64) {
-                new_word &= (1u64 << (width % 64)) - 1;
-            }
-
+        for &(row, wi, new_word) in &results {
             self.next[row * wpr + wi] = new_word;
 
             // Build word-level next frontier: one neighbourhood push per non-zero word.
