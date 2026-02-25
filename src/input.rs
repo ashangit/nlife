@@ -9,6 +9,7 @@ use crate::camera::{DEFAULT_CELL_SIZE, ZOOM_STEP};
 /// - `Space`   — toggle play/pause
 /// - `S`       — step one generation (paused only)
 /// - `R`       — clear the grid
+/// - `G`       — toggle grid lines
 /// - `=` / `+` — zoom in
 /// - `-`       — zoom out
 /// - `0`       — reset zoom to 100 %
@@ -17,11 +18,12 @@ use crate::camera::{DEFAULT_CELL_SIZE, ZOOM_STEP};
 /// * `app` — mutable application state
 /// * `ctx` — egui context for reading input
 pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
-    let (toggle, step, clear, zoom_in, zoom_out, zoom_reset) = ctx.input(|i| {
+    let (toggle, step, clear, grid_lines, zoom_in, zoom_out, zoom_reset) = ctx.input(|i| {
         (
             i.key_pressed(Key::Space),
             i.key_pressed(Key::S) && !app.sim.running,
             i.key_pressed(Key::R),
+            i.key_pressed(Key::G),
             i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus),
             i.key_pressed(Key::Minus),
             i.key_pressed(Key::Num0),
@@ -36,6 +38,9 @@ pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
     }
     if clear {
         app.sim.clear();
+    }
+    if grid_lines {
+        app.show_grid_lines = !app.show_grid_lines;
     }
     let center = app.camera.viewport_rect.size() / 2.0;
     if zoom_in {

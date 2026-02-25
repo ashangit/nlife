@@ -35,6 +35,8 @@ pub struct GameOfLifeApp {
     /// User-saved patterns loaded from `~/.config/newlife/patterns/`.
     /// Each entry is `(name, centred_cells)`.
     pub(crate) user_patterns: Vec<(String, Vec<(i32, i32)>)>,
+    /// Whether grid lines are currently shown on the canvas.
+    pub(crate) show_grid_lines: bool,
     /// Whether the "Save Pattern…" inline name popup is currently open.
     pub(crate) save_popup_open: bool,
     /// Text field value for the in-progress save-pattern name.
@@ -66,6 +68,7 @@ impl GameOfLifeApp {
             browser_category: None,
             browser_search: String::new(),
             user_patterns,
+            show_grid_lines: false,
             save_popup_open: false,
             save_name: String::new(),
             browser_entries: Vec::new(),
@@ -152,6 +155,47 @@ fn user_patterns_dir() -> Option<String> {
     std::env::var("HOME")
         .ok()
         .map(|home| format!("{home}/{USER_PATTERNS_SUBDIR}"))
+}
+
+#[cfg(test)]
+impl GameOfLifeApp {
+    /// Constructs a minimal `GameOfLifeApp` with default field values for unit tests.
+    ///
+    /// Unlike `new()`, this does not require an `eframe::CreationContext` and does
+    /// not load user patterns from disk.
+    pub(crate) fn new_for_test() -> Self {
+        let mut app = Self {
+            sim: Simulation::new(),
+            camera: Camera::new(),
+            drag_paint_state: None,
+            browser_category: None,
+            browser_search: String::new(),
+            user_patterns: Vec::new(),
+            show_grid_lines: false,
+            save_popup_open: false,
+            save_name: String::new(),
+            browser_entries: Vec::new(),
+            browser_entries_cat: None,
+            browser_entries_search: String::new(),
+            preview_textures: HashMap::new(),
+        };
+        app.rebuild_browser_entries();
+        app
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_show_grid_lines_default() {
+        let app = GameOfLifeApp::new_for_test();
+        assert!(
+            !app.show_grid_lines,
+            "show_grid_lines should default to false"
+        );
+    }
 }
 
 impl eframe::App for GameOfLifeApp {

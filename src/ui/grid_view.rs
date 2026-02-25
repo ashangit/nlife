@@ -1,4 +1,4 @@
-use egui::{Color32, Painter, Pos2, Rect, Sense, Vec2};
+use egui::{Color32, Painter, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::app::GameOfLifeApp;
 
@@ -10,6 +10,10 @@ pub(crate) const COLOR_BG: Color32 = Color32::from_gray(30);
 pub(crate) const COLOR_ALIVE: Color32 = Color32::from_rgb(180, 230, 100);
 /// Fill colour for dead cells.
 const COLOR_DEAD: Color32 = Color32::from_gray(45);
+/// Minimum cell size (in logical pixels) at which grid lines are drawn.
+const GRID_LINE_MIN_CELL_SIZE: f32 = 4.0;
+/// Colour for grid lines.
+const COLOR_GRID_LINE: Color32 = Color32::from_gray(60);
 
 /// Draws the central grid canvas and handles mouse drag-painting.
 ///
@@ -38,6 +42,11 @@ pub(crate) fn draw_grid(app: &mut GameOfLifeApp, ui: &mut egui::Ui) {
     // Paint cells (only those inside the visible viewport)
     let viewport = app.camera.viewport_rect;
     paint_cells(app, &painter, origin, viewport);
+
+    // Optionally draw grid lines when zoomed in enough.
+    if app.show_grid_lines && app.camera.cell_size >= GRID_LINE_MIN_CELL_SIZE {
+        paint_grid_lines(app, &painter, origin, viewport);
+    }
 
     // Show cell coordinate tooltip on hover.
     if let Some(hover_pos) = response.hover_pos()
@@ -125,5 +134,46 @@ fn paint_cells(app: &GameOfLifeApp, painter: &Painter, origin: Pos2, viewport: e
             };
             painter.rect_filled(rect, 0.0, color);
         }
+    }
+}
+
+/// Draws hairline grid lines over the visible portion of the canvas.
+///
+/// Uses the same viewport-cull math as `paint_cells` to avoid emitting
+/// off-screen line segments.  Lines are drawn at 0.5 px width so they
+/// remain crisp at all zoom levels without eating into cell bodies.
+///
+/// # Arguments
+/// * `app`      — application state (read-only access to grid and camera)
+/// * `painter`  — egui painter for the grid canvas
+/// * `origin`   — screen-space top-left corner of the grid canvas
+/// * `viewport` — screen-space rectangle of the visible scroll-area window
+fn paint_grid_lines(app: &GameOfLifeApp, painter: &Painter, origin: Pos2, viewport: Rect) {
+    let s = app.camera.cell_size;
+    let stroke = Stroke::new(0.5, COLOR_GRID_LINE);
+
+    // Visible column range.
+    let col_min = ((viewport.min.x - origin.x) / s).floor().max(0.0) as usize;
+    let col_max =
+        (((viewport.max.x - origin.x) / s).ceil() as usize + 1).min(app.sim.grid.width + 1);
+    // Visible row range.
+    let row_min = ((viewport.min.y - origin.y) / s).floor().max(0.0) as usize;
+    let row_max =
+        (((viewport.max.y - origin.y) / s).ceil() as usize + 1).min(app.sim.grid.height + 1);
+
+    let x_start = origin.x + col_min as f32 * s;
+    let x_end = origin.x + (col_max - 1) as f32 * s;
+    let y_start = origin.y + row_min as f32 * s;
+    let y_end = origin.y + (row_max - 1) as f32 * s;
+
+    // Horizontal lines — one per row boundary.
+    for row in row_min..row_max {
+        let y = origin.y + row as f32 * s;
+        painter.line_segment([Pos2::new(x_start, y), Pos2::new(x_end, y)], stroke);
+    }
+    // Vertical lines — one per column boundary.
+    for col in col_min..col_max {
+        let x = origin.x + col as f32 * s;
+        painter.line_segment([Pos2::new(x, y_start), Pos2::new(x, y_end)], stroke);
     }
 }
