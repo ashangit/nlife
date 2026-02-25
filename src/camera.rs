@@ -1,7 +1,7 @@
 /// Default cell size in logical pixels.
 pub(crate) const DEFAULT_CELL_SIZE: f32 = 10.0;
 /// Minimum allowed cell size in logical pixels.
-const MIN_CELL_SIZE: f32 = 2.0;
+const MIN_CELL_SIZE: f32 = 1.0;
 /// Maximum allowed cell size in logical pixels.
 pub(crate) const MAX_CELL_SIZE: f32 = 64.0;
 /// Multiplicative factor for each keyboard/button zoom step.
@@ -199,6 +199,17 @@ mod tests {
         assert_eq!(
             cam.target_cell_size, MAX_CELL_SIZE,
             "target_cell_size should be clamped at MAX_CELL_SIZE"
+        );
+    }
+
+    #[test]
+    fn test_set_zoom_target_clamps_min() {
+        // A tiny factor should clamp at MIN_CELL_SIZE (1.0).
+        let mut cam = Camera::new();
+        cam.set_zoom_target(0.000_001, egui::Vec2::ZERO);
+        assert_eq!(
+            cam.target_cell_size, MIN_CELL_SIZE,
+            "target_cell_size should be clamped at MIN_CELL_SIZE"
         );
     }
 }

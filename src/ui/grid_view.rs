@@ -116,7 +116,8 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
 /// * `viewport` — screen-space rectangle of the visible scroll-area window
 fn paint_cells(app: &GameOfLifeApp, painter: &Painter, origin: Pos2, viewport: egui::Rect) {
     let s = app.camera.cell_size;
-    let fill_size = s - CELL_GAP_PX;
+    // Drop the gap when s ≤ CELL_GAP_PX so fill_size stays positive at minimum zoom.
+    let fill_size = if s > CELL_GAP_PX { s - CELL_GAP_PX } else { s };
 
     // Project viewport edges into grid coordinates to find the visible range.
     let col_min = ((viewport.min.x - origin.x) / s).floor().max(0.0) as usize;
