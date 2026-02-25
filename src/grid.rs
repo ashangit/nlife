@@ -464,7 +464,7 @@ impl Grid {
     ///
     /// Returns `(added_top_rows, added_left_cols)` so the caller can
     /// compensate its scroll offset.  `live_bbox` and `frontier` are shifted;
-    /// `prev_written_words` is cleared (the fresh `next` buffer has no stale data).
+    /// `prev_written` is cleared (the fresh `next` buffer has no stale data).
     pub fn expand_if_needed(&mut self) -> (usize, usize) {
         let top = (0..self.width).any(|c| self.get(0, c));
         let bottom = (0..self.width).any(|c| self.get(self.height - 1, c));
@@ -485,10 +485,29 @@ impl Grid {
         let new_wpr = new_w.div_ceil(64);
         let n = new_h * new_wpr;
         let mut new_cells = vec![0u64; n];
+
+        // Word-level copy: O(H × wpr) instead of O(H × W).
+        // Each source word shifts left by `bit_shift` bits within the destination
+        // row; overflow spills into the next word when `bit_shift > 0`.
+        let bit_shift = add_left % 64;
+        let word_shift = add_left / 64;
         for row in 0..self.height {
-            for col in 0..self.width {
-                if get_bit(&self.cells, self.words_per_row, row, col) {
-                    set_bit(&mut new_cells, new_wpr, row + add_top, col + add_left, true);
+            let src_base = row * self.words_per_row;
+            let dst_base = (row + add_top) * new_wpr;
+            for wi in 0..self.words_per_row {
+                let src = self.cells[src_base + wi];
+                if src == 0 {
+                    continue;
+                }
+                let dst_wi = wi + word_shift;
+                if bit_shift == 0 {
+                    new_cells[dst_base + dst_wi] |= src;
+                } else {
+                    // Handle separately to avoid `src >> 64` (undefined for u64).
+                    new_cells[dst_base + dst_wi] |= src << bit_shift;
+                    if dst_wi + 1 < new_wpr {
+                        new_cells[dst_base + dst_wi + 1] |= src >> (64 - bit_shift);
+                    }
                 }
             }
         }
