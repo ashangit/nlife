@@ -50,6 +50,8 @@ pub struct GameOfLifeApp {
     /// User-saved patterns loaded from `~/.config/newlife/patterns/`.
     /// Each entry is `(name, centred_cells)`.
     pub(crate) user_patterns: Vec<(String, Vec<(i32, i32)>)>,
+    /// Density percentage used by the "🎲 Random" fill button (1–100).
+    pub(crate) random_density: u8,
     /// Whether the F1 keyboard cheat-sheet overlay is currently visible.
     pub(crate) show_help: bool,
     /// Whether grid lines are currently shown on the canvas.
@@ -85,6 +87,7 @@ impl GameOfLifeApp {
             browser_category: None,
             browser_search: String::new(),
             user_patterns,
+            random_density: 30,
             show_help: false,
             show_grid_lines: false,
             save_popup_open: false,
@@ -189,6 +192,7 @@ impl GameOfLifeApp {
             browser_category: None,
             browser_search: String::new(),
             user_patterns: Vec::new(),
+            random_density: 30,
             show_help: false,
             show_grid_lines: false,
             save_popup_open: false,

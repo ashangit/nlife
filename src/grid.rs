@@ -473,6 +473,37 @@ impl Grid {
         }
     }
 
+    /// Fills the grid randomly using an xorshift64 PRNG seeded with `seed`.
+    ///
+    /// Clears all existing cells first. Each cell is set alive with probability
+    /// `density_pct / 100` (clamped to [0, 100]).  A seed of 0 is promoted
+    /// to 1 so the PRNG never stalls.
+    ///
+    /// # Arguments
+    /// * `density_pct` — percentage of cells to set alive (0 = none, 100 = all)
+    /// * `seed`        — PRNG seed; 0 is silently treated as 1
+    pub fn fill_random(&mut self, density_pct: u8, seed: u64) {
+        self.clear();
+        let density = density_pct.min(100) as u128;
+        // Threshold: a cell is alive when the PRNG output < threshold.
+        // threshold = density_pct / 100 * (u64::MAX + 1)  as u128 arithmetic.
+        let threshold = density * (u64::MAX as u128 + 1) / 100;
+
+        let mut state = if seed == 0 { 1 } else { seed };
+
+        for row in 0..self.height {
+            for col in 0..self.width {
+                // xorshift64 step.
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                if (state as u128) < threshold {
+                    self.set(row, col, true);
+                }
+            }
+        }
+    }
+
     /// Checks all four edges for live cells and, for each edge that has one,
     /// adds `MARGIN` dead rows/columns on that side.  The cells buffer is
     /// rebuilt in place.
@@ -968,6 +999,50 @@ mod tests {
         assert!(
             g.frontier.is_empty(),
             "frontier should be empty after clear"
+        );
+    }
+
+    #[test]
+    fn test_fill_random_density() {
+        // 50% density on a 100×100 grid should be within ±5% of 5000 live cells.
+        let mut g = Grid::new(100, 100);
+        g.fill_random(50, 42);
+        let count = live_cells(&g).len();
+        let expected = 5000usize;
+        let tolerance = 500usize; // 5%
+        assert!(
+            count >= expected - tolerance && count <= expected + tolerance,
+            "fill_random(50) produced {count} live cells, expected ~{expected} ±{tolerance}"
+        );
+    }
+
+    #[test]
+    fn test_fill_random_seed_zero() {
+        // seed=0 must not panic and should leave some live cells (density=50).
+        let mut g = Grid::new(50, 50);
+        g.fill_random(50, 0);
+        let count = live_cells(&g).len();
+        assert!(count > 0, "fill_random with seed=0 left no live cells");
+    }
+
+    #[test]
+    fn test_fill_random_all_dead() {
+        let mut g = Grid::new(20, 20);
+        g.fill_random(0, 1);
+        assert!(
+            live_cells(&g).is_empty(),
+            "fill_random(0) should leave an empty grid"
+        );
+    }
+
+    #[test]
+    fn test_fill_random_all_alive() {
+        let mut g = Grid::new(20, 20);
+        g.fill_random(100, 1);
+        assert_eq!(
+            live_cells(&g).len(),
+            20 * 20,
+            "fill_random(100) should fill every cell"
         );
     }
 

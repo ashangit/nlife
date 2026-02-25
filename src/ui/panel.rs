@@ -26,6 +26,14 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             if ui.button("🗑 Clear").clicked() {
                 app.sim.clear();
             }
+            if ui.button("🎲 Random").clicked() {
+                app.sim.fill_random(app.random_density);
+            }
+            ui.add(
+                egui::DragValue::new(&mut app.random_density)
+                    .range(1..=100u8)
+                    .suffix(" %"),
+            );
 
             ui.separator();
             ui.label("Speed:");

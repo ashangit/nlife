@@ -1,3 +1,5 @@
+use std::time::{SystemTime, UNIX_EPOCH};
+
 use crate::grid::Grid;
 
 /// Initial grid width in cells.
@@ -52,6 +54,23 @@ impl Simulation {
         self.grid.set_cells(cells);
         self.generation = 0;
         self.running = false;
+        self.time_since_last_step = 0.0;
+    }
+
+    /// Fills the grid randomly using a time-derived seed and resets the simulation.
+    ///
+    /// Derives the PRNG seed from `SystemTime::now()` so each call produces a
+    /// different pattern.  Resets `generation` and `time_since_last_step`.
+    ///
+    /// # Arguments
+    /// * `density_pct` — percentage of cells to set alive (0–100)
+    pub(crate) fn fill_random(&mut self, density_pct: u8) {
+        let seed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.subsec_nanos() as u64)
+            .unwrap_or(1);
+        self.grid.fill_random(density_pct, seed);
+        self.generation = 0;
         self.time_since_last_step = 0.0;
     }
 
