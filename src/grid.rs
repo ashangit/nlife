@@ -479,12 +479,17 @@ impl Grid {
     /// `(row as i32 - height/2, col as i32 - width/2)`.  The result is
     /// compatible with [`set_cells`] so a grid can be round-tripped through
     /// the `.cells` serialisation format.
+    ///
+    /// Scans only within `live_bbox` — O(bbox area) instead of O(W×H).
     pub fn live_cells_offsets(&self) -> Vec<(i32, i32)> {
         let origin_row = (self.height / 2) as i32;
         let origin_col = (self.width / 2) as i32;
+        let Some([rmin, cmin, rmax, cmax]) = self.live_bbox else {
+            return Vec::new();
+        };
         let mut out = Vec::new();
-        for row in 0..self.height {
-            for col in 0..self.width {
+        for row in rmin..=rmax {
+            for col in cmin..=cmax {
                 if self.get(row, col) {
                     out.push((row as i32 - origin_row, col as i32 - origin_col));
                 }
@@ -1053,6 +1058,23 @@ mod tests {
             live_cells(&g1),
             live_cells(&g2),
             "round-tripped grid must have the same live cells"
+        );
+    }
+
+    #[test]
+    fn test_live_cells_offsets_corner() {
+        // Place a single live cell at (0, 0) — top-left corner — on a 40×40 grid.
+        // live_bbox == [0,0,0,0]; bbox-bounded scan must still find it.
+        let mut g = Grid::new(40, 40);
+        g.set(0, 0, true);
+        let offsets = g.live_cells_offsets();
+        assert_eq!(offsets.len(), 1, "expected exactly one offset");
+        let origin_row = (40 / 2) as i32;
+        let origin_col = (40 / 2) as i32;
+        assert_eq!(
+            offsets[0],
+            (-origin_row, -origin_col),
+            "corner cell offset must be (-origin_row, -origin_col)"
         );
     }
 
