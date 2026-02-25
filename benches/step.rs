@@ -54,6 +54,31 @@ fn make_grid(width: usize, height: usize, rle: &str) -> Grid {
     g
 }
 
+/// Seeds a `width × height` grid with approximately `density_pct`% live cells using an
+/// xorshift64 PRNG initialised with `seed`.  Calls `Grid::set` so `frontier` is correctly
+/// populated for the first `step()` call.
+///
+/// # Arguments
+/// * `width`, `height` — grid dimensions in cells
+/// * `density_pct`     — target live-cell percentage (0–100)
+/// * `seed`            — xorshift64 seed (must be non-zero)
+fn make_random_grid(width: usize, height: usize, density_pct: u8, seed: u64) -> Grid {
+    let mut g = Grid::new(width, height);
+    let threshold = (density_pct as u128) * (u64::MAX as u128) / 100;
+    let mut rng = seed;
+    for row in 0..height {
+        for col in 0..width {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            if (rng as u128) < threshold {
+                g.set(row, col, true);
+            }
+        }
+    }
+    g
+}
+
 // ── Benchmark group: Grid::step() ────────────────────────────────────────────
 
 /// Benchmark `Grid::step()` for four patterns of increasing complexity.
@@ -112,6 +137,24 @@ fn bench_grid_step(c: &mut Criterion) {
                 black_box(());
             },
             BatchSize::SmallInput,
+        );
+    });
+
+    // ── large_soup ────────────────────────────────────────────────────────────
+    // 1024×1024 grid at 20 % density ≈ 209 k live cells, frontier ≈ 14 000 words.
+    // Well above RAYON_THRESHOLD — exercises and validates the parallel path.
+    // BatchSize::LargeInput: Criterion does not clone; setup owns the grid.
+    // sample_size(10) + 15 s keeps total wall-time ≤ 5 min.
+    group.measurement_time(Duration::from_secs(15));
+    group.sample_size(10);
+    group.bench_function("large_soup", |b| {
+        b.iter_batched(
+            || make_random_grid(1024, 1024, 20, 0xDEAD_BEEF_1234_5678),
+            |mut g| {
+                g.step();
+                black_box(());
+            },
+            BatchSize::LargeInput,
         );
     });
 
