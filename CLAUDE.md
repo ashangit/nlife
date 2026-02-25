@@ -12,6 +12,7 @@ cargo test <name>     # run a single test, e.g. cargo test test_blinker_oscillat
 cargo clippy          # lint
 cargo fmt             # format
 cargo build --release # optimised build
+cargo bench --bench step   # microbenchmarks; run after any perf change to grid.rs
 ```
 
 ## Workflow
@@ -24,6 +25,10 @@ cargo build --release # optimised build
   it and why (not just "updated X" — describe the actual change).
 - **Summarise changes**: after completing any modification, provide a summary listing every
   modified file and a brief description of what changed in each.
+- **Benchmark after perf changes**: after any change to a hot path in `grid.rs`, run
+  `cargo bench --bench step -- --save-baseline after` and compare it against a `before`
+  baseline captured at the prior commit.  A regression on any existing benchmark must be
+  justified or fixed before the commit is complete.
 - **Unit tests are mandatory**: every source code change must include corresponding test
   updates — add new tests for new behaviour, update existing tests when behaviour changes,
   and delete tests that cover removed functionality.  A change without an appropriate test
@@ -62,10 +67,10 @@ handle_keyboard → handle_zoom → advance_simulation → draw_top_panel → dr
 ### Grid internals (`grid.rs`) — three interleaved optimisations
 
 1. **Bit-packed storage** — `Vec<u64>`, row-major, 64 cells per word (LSB = leftmost). `words_per_row = ⌈width/64⌉`. 8× memory reduction vs `Vec<bool>`.
-2. **Active-cell frontier** — `frontier: HashSet<(row, col)>` holds every live cell and its Moore neighbourhood. `step()` maps frontier entries to `(row, word_index)` pairs, evaluating only those words — O(live + border) per step.
+2. **Word-level frontier** — `frontier: Vec<(row, wi)>` (sorted, deduplicated lazily) covers every word that contains a live cell or is adjacent to one. `step()` evaluates only those words — O(live + border) per step.
 3. **SWAR kernel** (`step_word`) — evaluates all 64 bit positions of a word simultaneously via carry-save adder trees (~30 bitwise ops) instead of 64 individual neighbour loops.
 
-Double-buffer: `cells` (current) and `next` (scratch) swap each step. `prev_written_words` tracks which `next` words need zeroing at the start of the following step.
+Double-buffer: `cells` (current) and `next` (scratch) swap each step. `prev_written: Vec<(row, wi)>` tracks which `next` words need zeroing at the start of the following step via a merge-scan (no hashing).
 
 Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead rows/cols are prepended on that side and the scroll offset is shifted to keep the view stable.
 
