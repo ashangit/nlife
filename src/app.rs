@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use crate::camera::Camera;
 use crate::library::{Category, decoded_library};
@@ -52,6 +52,10 @@ pub struct GameOfLifeApp {
     pub(crate) user_patterns: Vec<(String, Vec<(i32, i32)>)>,
     /// Density percentage used by the "🎲 Random" fill button (1–100).
     pub(crate) random_density: u8,
+    /// Rolling history of live-cell counts, kept at most 128 entries.
+    ///
+    /// Pushed once per `advance_simulation` call (not once per step).
+    pub(crate) pop_history: VecDeque<u64>,
     /// Whether the F1 keyboard cheat-sheet overlay is currently visible.
     pub(crate) show_help: bool,
     /// Whether grid lines are currently shown on the canvas.
@@ -88,6 +92,7 @@ impl GameOfLifeApp {
             browser_search: String::new(),
             user_patterns,
             random_density: 30,
+            pop_history: VecDeque::new(),
             show_help: false,
             show_grid_lines: false,
             save_popup_open: false,
@@ -164,6 +169,11 @@ impl GameOfLifeApp {
         let dt = (ctx.input(|i| i.unstable_dt) as f64).min(0.1);
         let (t, l) = self.sim.advance(dt);
         self.camera.apply_expansion(t, l);
+        // Track live-cell population history (max 128 samples).
+        self.pop_history.push_back(self.sim.grid.live_count());
+        if self.pop_history.len() > 128 {
+            self.pop_history.pop_front();
+        }
         ctx.request_repaint();
     }
 }
@@ -193,6 +203,7 @@ impl GameOfLifeApp {
             browser_search: String::new(),
             user_patterns: Vec::new(),
             random_density: 30,
+            pop_history: VecDeque::new(),
             show_help: false,
             show_grid_lines: false,
             save_popup_open: false,

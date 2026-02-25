@@ -1,3 +1,5 @@
+use egui::{Color32, Rect, Vec2};
+
 use crate::app::GameOfLifeApp;
 use crate::camera::{DEFAULT_CELL_SIZE, ZOOM_STEP};
 
@@ -45,6 +47,30 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
 
             ui.separator();
             ui.label(format!("Gen: {}", app.sim.generation));
+
+            ui.separator();
+            let pop = app.sim.grid.live_count();
+            ui.label(format!("Pop: {pop}"));
+            // Sparkline: 80×18 px canvas showing rolling population history.
+            let (sparkline_rect, _) =
+                ui.allocate_exact_size(Vec2::new(80.0, 18.0), egui::Sense::hover());
+            let painter = ui.painter_at(sparkline_rect);
+            painter.rect_filled(sparkline_rect, 2.0, Color32::from_gray(20));
+            if app.pop_history.len() > 1 {
+                let max_v = *app.pop_history.iter().max().unwrap_or(&1);
+                let max_v = max_v.max(1) as f32;
+                let n = app.pop_history.len();
+                let bar_w = sparkline_rect.width() / n as f32;
+                for (i, &v) in app.pop_history.iter().enumerate() {
+                    let h = (v as f32 / max_v) * sparkline_rect.height();
+                    let x = sparkline_rect.min.x + i as f32 * bar_w;
+                    let bar = Rect::from_min_size(
+                        egui::Pos2::new(x, sparkline_rect.max.y - h),
+                        Vec2::new(bar_w.max(1.0), h.max(1.0)),
+                    );
+                    painter.rect_filled(bar, 0.0, Color32::from_rgb(100, 200, 80));
+                }
+            }
 
             ui.separator();
             let pct = (app.camera.cell_size / DEFAULT_CELL_SIZE * 100.0).round() as u32;

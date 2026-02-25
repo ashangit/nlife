@@ -473,6 +473,14 @@ impl Grid {
         }
     }
 
+    /// Returns the total number of live cells in the grid.
+    ///
+    /// Counts set bits in the packed `cells` buffer; runs in O(words) time,
+    /// independent of grid density.
+    pub fn live_count(&self) -> u64 {
+        self.cells.iter().map(|&w| w.count_ones() as u64).sum()
+    }
+
     /// Fills the grid randomly using an xorshift64 PRNG seeded with `seed`.
     ///
     /// Clears all existing cells first. Each cell is set alive with probability
@@ -999,6 +1007,33 @@ mod tests {
         assert!(
             g.frontier.is_empty(),
             "frontier should be empty after clear"
+        );
+    }
+
+    #[test]
+    fn test_live_count_empty() {
+        let g = Grid::new(20, 20);
+        assert_eq!(g.live_count(), 0, "empty grid should have 0 live cells");
+    }
+
+    #[test]
+    fn test_live_count_known() {
+        // A 2×2 block has exactly 4 live cells.
+        let g = make_grid(20, 20, &[(5, 5), (5, 6), (6, 5), (6, 6)]);
+        assert_eq!(g.live_count(), 4);
+    }
+
+    #[test]
+    fn test_live_count_after_step() {
+        // A horizontal blinker has 3 live cells; after one step it is vertical
+        // but still has 3 live cells.
+        let mut g = make_grid(20, 20, &[(5, 4), (5, 5), (5, 6)]);
+        assert_eq!(g.live_count(), 3);
+        g.step();
+        assert_eq!(
+            g.live_count(),
+            3,
+            "blinker should still have 3 live cells after one step"
         );
     }
 
