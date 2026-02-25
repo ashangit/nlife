@@ -473,6 +473,26 @@ impl Grid {
         }
     }
 
+    /// Returns all live cells as centred `(row_offset, col_offset)` pairs.
+    ///
+    /// Each live cell at `(row, col)` is returned as
+    /// `(row as i32 - height/2, col as i32 - width/2)`.  The result is
+    /// compatible with [`set_cells`] so a grid can be round-tripped through
+    /// the `.cells` serialisation format.
+    pub fn live_cells_offsets(&self) -> Vec<(i32, i32)> {
+        let origin_row = (self.height / 2) as i32;
+        let origin_col = (self.width / 2) as i32;
+        let mut out = Vec::new();
+        for row in 0..self.height {
+            for col in 0..self.width {
+                if self.get(row, col) {
+                    out.push((row as i32 - origin_row, col as i32 - origin_col));
+                }
+            }
+        }
+        out
+    }
+
     /// Returns the total number of live cells in the grid.
     ///
     /// Counts set bits in the packed `cells` buffer; runs in O(words) time,
@@ -1007,6 +1027,32 @@ mod tests {
         assert!(
             g.frontier.is_empty(),
             "frontier should be empty after clear"
+        );
+    }
+
+    #[test]
+    fn test_live_cells_offsets_empty() {
+        let g = Grid::new(20, 20);
+        assert!(
+            g.live_cells_offsets().is_empty(),
+            "empty grid should return no offsets"
+        );
+    }
+
+    #[test]
+    fn test_live_cells_offsets_roundtrip() {
+        // Place a horizontal blinker, extract offsets, reload onto a new grid,
+        // and confirm the live cell set is identical.
+        let size = 40;
+        let blinker = &[(5, 4), (5, 5), (5, 6)];
+        let g1 = make_grid(size, size, blinker);
+        let offsets = g1.live_cells_offsets();
+        let mut g2 = Grid::new(size, size);
+        g2.set_cells(&offsets);
+        assert_eq!(
+            live_cells(&g1),
+            live_cells(&g2),
+            "round-tripped grid must have the same live cells"
         );
     }
 

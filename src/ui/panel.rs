@@ -88,6 +88,42 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             }
 
             ui.separator();
+            // Save current grid as a .cells file chosen by the user.
+            if ui.button("💾 Save").clicked() {
+                let offsets = app.sim.grid.live_cells_offsets();
+                if !offsets.is_empty()
+                    && let Some(path) = rfd::FileDialog::new()
+                        .add_filter("Plaintext cells", &["cells"])
+                        .set_file_name("pattern.cells")
+                        .save_file()
+                {
+                    let content = crate::rle::write_cells(&offsets, "pattern");
+                    let _ = std::fs::write(&path, content);
+                }
+            }
+            // Load a .cells or .rle file chosen by the user.
+            if ui.button("📂 Load").clicked()
+                && let Some(path) = rfd::FileDialog::new()
+                    .add_filter("Pattern files", &["cells", "rle"])
+                    .pick_file()
+                && let Ok(content) = std::fs::read_to_string(&path)
+            {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                let cells = if ext == "rle" {
+                    crate::rle::parse_rle(&content).ok().map(|p| p.cells)
+                } else {
+                    crate::rle::parse_cells(&content).ok()
+                };
+                if let Some(cells) = cells {
+                    app.sim.load_cells(&crate::rle::center_cells(cells));
+                }
+            }
+
+            ui.separator();
             ui.label("Steps/frame:");
             ui.add(
                 egui::DragValue::new(&mut app.sim.steps_per_frame)

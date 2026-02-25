@@ -9,6 +9,7 @@ eframe = { version = "0.33", default-features = false, features = [
 ] }
 egui  = "0.33"
 rayon = "1"
+rfd = "0.15"
 rustc-hash = "2"
 # Re-enable the Vulkan backend: egui-wgpu 0.33 pulls wgpu with
 # default-features = false, so no GPU backend is compiled in otherwise.
