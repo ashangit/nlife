@@ -9,6 +9,21 @@ use crate::ui::COLOR_BG;
 /// Directory under `$HOME` where user-saved `.cells` pattern files are stored.
 const USER_PATTERNS_SUBDIR: &str = ".config/newlife/patterns";
 
+/// Keyboard shortcut table shown in the F1 help overlay.
+///
+/// Each entry is a `(key, description)` pair rendered in a two-column grid.
+const SHORTCUTS: &[(&str, &str)] = &[
+    ("Space", "Play / Pause"),
+    ("S", "Step one generation (paused)"),
+    ("R", "Clear grid"),
+    ("G", "Toggle grid lines"),
+    ("= / +", "Zoom in"),
+    ("-", "Zoom out"),
+    ("0", "Reset zoom to 100 %"),
+    ("F1", "Show / hide this cheat-sheet"),
+    ("Ctrl+scroll", "Zoom in / out"),
+];
+
 /// An entry in the filtered, unified browser list.
 ///
 /// `Library(i)` indexes into `decoded_library()`; `User(i)` indexes into
@@ -35,6 +50,8 @@ pub struct GameOfLifeApp {
     /// User-saved patterns loaded from `~/.config/newlife/patterns/`.
     /// Each entry is `(name, centred_cells)`.
     pub(crate) user_patterns: Vec<(String, Vec<(i32, i32)>)>,
+    /// Whether the F1 keyboard cheat-sheet overlay is currently visible.
+    pub(crate) show_help: bool,
     /// Whether grid lines are currently shown on the canvas.
     pub(crate) show_grid_lines: bool,
     /// Whether the "Save Pattern…" inline name popup is currently open.
@@ -68,6 +85,7 @@ impl GameOfLifeApp {
             browser_category: None,
             browser_search: String::new(),
             user_patterns,
+            show_help: false,
             show_grid_lines: false,
             save_popup_open: false,
             save_name: String::new(),
@@ -171,6 +189,7 @@ impl GameOfLifeApp {
             browser_category: None,
             browser_search: String::new(),
             user_patterns: Vec::new(),
+            show_help: false,
             show_grid_lines: false,
             save_popup_open: false,
             save_name: String::new(),
@@ -196,6 +215,12 @@ mod tests {
             "show_grid_lines should default to false"
         );
     }
+
+    #[test]
+    fn test_show_help_default() {
+        let app = GameOfLifeApp::new_for_test();
+        assert!(!app.show_help, "show_help should default to false");
+    }
 }
 
 impl eframe::App for GameOfLifeApp {
@@ -218,5 +243,34 @@ impl eframe::App for GameOfLifeApp {
                 self.camera.scroll_offset = output.state.offset;
                 self.camera.viewport_rect = output.inner_rect;
             });
+
+        // Keyboard cheat-sheet overlay (F1).
+        if self.show_help {
+            let mut open = true;
+            egui::Window::new("Keyboard Shortcuts")
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::ZERO)
+                .open(&mut open)
+                .show(ctx, |ui| {
+                    egui::Grid::new("shortcuts_grid")
+                        .striped(true)
+                        .num_columns(2)
+                        .show(ui, |ui| {
+                            for &(key, desc) in SHORTCUTS {
+                                ui.strong(key);
+                                ui.label(desc);
+                                ui.end_row();
+                            }
+                        });
+                    ui.separator();
+                    if ui.button("Close (F1)").clicked() {
+                        self.show_help = false;
+                    }
+                });
+            if !open {
+                self.show_help = false;
+            }
+        }
     }
 }
