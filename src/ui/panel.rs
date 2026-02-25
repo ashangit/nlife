@@ -120,6 +120,7 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
                 };
                 if let Some(cells) = cells {
                     app.sim.load_cells(&crate::rle::center_cells(cells));
+                    app.center_camera_on_grid();
                 }
             }
 

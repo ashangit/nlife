@@ -160,6 +160,20 @@ impl GameOfLifeApp {
         self.browser_entries_search = search_lower;
     }
 
+    /// Resets the camera scroll offset to centre on the loaded pattern and clears pop history.
+    ///
+    /// Should be called immediately after every `sim.load_cells` invocation so the
+    /// viewport is positioned at the centre of the grid where the pattern was placed.
+    pub(crate) fn center_camera_on_grid(&mut self) {
+        let s = self.camera.cell_size;
+        let vp = self.camera.viewport_rect.size();
+        self.camera.scroll_offset = egui::Vec2::new(
+            (self.sim.grid.width as f32 * s / 2.0 - vp.x / 2.0).max(0.0),
+            (self.sim.grid.height as f32 * s / 2.0 - vp.y / 2.0).max(0.0),
+        );
+        self.pop_history.clear();
+    }
+
     /// Advances the simulation by as many steps as `dt` seconds warrant at the current speed,
     /// capping `dt` at 0.1 s to avoid a large first-frame spike.
     fn advance_simulation(&mut self, ctx: &egui::Context) {

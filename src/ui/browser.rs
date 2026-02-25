@@ -160,6 +160,7 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
             }
             if let Some(cells) = to_load {
                 app.sim.load_cells(&cells);
+                app.center_camera_on_grid();
             }
         });
 }
