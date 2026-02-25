@@ -40,9 +40,13 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             ui.separator();
             ui.label("Speed:");
             ui.add(
-                egui::Slider::new(&mut app.sim.speed, 1.0..=60.0)
+                egui::Slider::new(&mut app.sim.speed, 1.0..=10_000.0)
                     .suffix(" gen/s")
-                    .step_by(1.0),
+                    .logarithmic(true),
+            )
+            .on_hover_text(
+                "Generations per second (log scale).\n\
+                 Use 'Steps/frame' below to run multiple steps per visual frame.",
             );
 
             ui.separator();
