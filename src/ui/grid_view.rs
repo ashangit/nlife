@@ -103,12 +103,11 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
 
 /// Renders only the cells that intersect `viewport` to the painter.
 ///
-/// **SWAR mode**: iterates every `(row, col)` in the visible range and paints
-/// `COLOR_ALIVE` or `COLOR_DEAD` for each cell — O(viewport area).
-///
-/// **HashLife mode**: fills the visible grid area with `COLOR_DEAD` then calls
-/// `sim.live_cells_in_viewport` and paints only those cells `COLOR_ALIVE` —
-/// O(live cells in viewport + tree depth).
+/// Both engines use the same sparse strategy: fill the visible area with
+/// `COLOR_DEAD` in a single rect, then paint only the live cells `COLOR_ALIVE`.
+/// This reduces the egui draw-call count from O(viewport area) to
+/// O(1 + live cells in viewport), which is a significant win at low zoom or
+/// low density.
 ///
 /// # Arguments
 /// * `app`      — application state (read-only access to grid and camera)
@@ -125,39 +124,22 @@ fn paint_cells(app: &GameOfLifeApp, painter: &Painter, origin: Pos2, viewport: e
     let row_min = ((viewport.min.y - origin.y) / s).floor().max(0.0) as usize;
     let row_max = (((viewport.max.y - origin.y) / s).ceil() as usize).min(app.sim.height());
 
-    if app.sim.is_hashlife() {
-        // HashLife: fill visible grid area with dead colour, then draw sparse live cells.
-        let x_start = origin.x + col_min as f32 * s;
-        let y_start = origin.y + row_min as f32 * s;
-        let x_end = origin.x + col_max as f32 * s;
-        let y_end = origin.y + row_max as f32 * s;
-        let dead_area = Rect::from_min_max(Pos2::new(x_start, y_start), Pos2::new(x_end, y_end));
-        painter.rect_filled(dead_area, 0.0, COLOR_DEAD);
+    // Fill the visible area dead in one call, then paint only live cells.
+    let x_start = origin.x + col_min as f32 * s;
+    let y_start = origin.y + row_min as f32 * s;
+    let x_end = origin.x + col_max as f32 * s;
+    let y_end = origin.y + row_max as f32 * s;
+    let dead_area = Rect::from_min_max(Pos2::new(x_start, y_start), Pos2::new(x_end, y_end));
+    painter.rect_filled(dead_area, 0.0, COLOR_DEAD);
 
-        for (row, col) in app
-            .sim
-            .live_cells_in_viewport(row_min, col_min, row_max, col_max)
-        {
-            let x = origin.x + col as f32 * s;
-            let y = origin.y + row as f32 * s;
-            let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(fill_size));
-            painter.rect_filled(rect, 0.0, COLOR_ALIVE);
-        }
-    } else {
-        // SWAR: iterate every visible cell and paint alive or dead.
-        for row in row_min..row_max {
-            for col in col_min..col_max {
-                let x = origin.x + col as f32 * s;
-                let y = origin.y + row as f32 * s;
-                let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(fill_size));
-                let color = if app.sim.get(row, col) {
-                    COLOR_ALIVE
-                } else {
-                    COLOR_DEAD
-                };
-                painter.rect_filled(rect, 0.0, color);
-            }
-        }
+    for (row, col) in app
+        .sim
+        .live_cells_in_viewport(row_min, col_min, row_max, col_max)
+    {
+        let x = origin.x + col as f32 * s;
+        let y = origin.y + row as f32 * s;
+        let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(fill_size));
+        painter.rect_filled(rect, 0.0, COLOR_ALIVE);
     }
 }
 
