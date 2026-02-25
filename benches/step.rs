@@ -42,7 +42,7 @@ const GOSPER_GUN_RLE: &str = "24bo$22bobo$12b2o6b2o12b2o$11bo3bo4b2o12b2o$2o8bo5
 /// # Panics
 /// Panics if `rle` fails to parse.
 fn make_grid(width: usize, height: usize, rle: &str) -> Grid {
-    let cells = center_cells(parse_rle(rle).expect("valid RLE"));
+    let cells = center_cells(parse_rle(rle).expect("valid RLE").cells);
     let origin_row = (height / 2) as i32;
     let origin_col = (width / 2) as i32;
     let mut g = Grid::new(width, height);
