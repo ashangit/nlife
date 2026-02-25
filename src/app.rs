@@ -243,6 +243,10 @@ impl eframe::App for GameOfLifeApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         crate::input::handle_keyboard(self, ctx);
         crate::input::handle_zoom(self, ctx);
+        // Advance smooth-zoom animation; request repaint while still animating.
+        if self.camera.tick_zoom() {
+            ctx.request_repaint();
+        }
         self.advance_simulation(ctx);
         crate::ui::draw_top_panel(self, ctx);
         crate::ui::draw_pattern_browser(self, ctx);

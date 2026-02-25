@@ -77,14 +77,14 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             ui.label(format!("Zoom: {pct}%"));
             let center = app.camera.viewport_rect.size() / 2.0;
             if ui.button("＋").clicked() {
-                app.camera.apply_zoom(ZOOM_STEP, center);
+                app.camera.set_zoom_target(ZOOM_STEP, center);
             }
             if ui.button("−").clicked() {
-                app.camera.apply_zoom(1.0 / ZOOM_STEP, center);
+                app.camera.set_zoom_target(1.0 / ZOOM_STEP, center);
             }
             if ui.button("1:1").clicked() {
                 app.camera
-                    .apply_zoom(DEFAULT_CELL_SIZE / app.camera.cell_size, center);
+                    .set_zoom_target(DEFAULT_CELL_SIZE / app.camera.target_cell_size(), center);
             }
 
             ui.separator();

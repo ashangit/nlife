@@ -49,14 +49,15 @@ pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
     }
     let center = app.camera.viewport_rect.size() / 2.0;
     if zoom_in {
-        app.camera.apply_zoom(ZOOM_STEP, center);
+        app.camera.set_zoom_target(ZOOM_STEP, center);
     }
     if zoom_out {
-        app.camera.apply_zoom(1.0 / ZOOM_STEP, center);
+        app.camera.set_zoom_target(1.0 / ZOOM_STEP, center);
     }
     if zoom_reset {
+        // Factor needed to reach DEFAULT_CELL_SIZE from the current target.
         app.camera
-            .apply_zoom(DEFAULT_CELL_SIZE / app.camera.cell_size, center);
+            .set_zoom_target(DEFAULT_CELL_SIZE / app.camera.target_cell_size(), center);
     }
 }
 
