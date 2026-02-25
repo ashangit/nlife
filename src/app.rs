@@ -1,11 +1,23 @@
+use std::collections::HashMap;
+
 use crate::camera::Camera;
-use crate::library::Category;
+use crate::library::{Category, decoded_library};
 use crate::rle::load_user_patterns;
 use crate::simulation::Simulation;
 use crate::ui::COLOR_BG;
 
 /// Directory under `$HOME` where user-saved `.cells` pattern files are stored.
 const USER_PATTERNS_SUBDIR: &str = ".config/newlife/patterns";
+
+/// An entry in the filtered, unified browser list.
+///
+/// `Library(i)` indexes into `decoded_library()`; `User(i)` indexes into
+/// `GameOfLifeApp::user_patterns`.
+#[derive(Debug, Clone)]
+pub(crate) enum BrowserEntry {
+    Library(usize),
+    User(usize),
+}
 
 /// Main application state for the Conway's Game of Life desktop app.
 pub struct GameOfLifeApp {
@@ -27,6 +39,16 @@ pub struct GameOfLifeApp {
     pub(crate) save_popup_open: bool,
     /// Text field value for the in-progress save-pattern name.
     pub(crate) save_name: String,
+    /// Filtered, unified list of browser entries (built-in + user).
+    /// Rebuilt when `browser_category`, `browser_search`, or `user_patterns` change.
+    pub(crate) browser_entries: Vec<BrowserEntry>,
+    /// Value of `browser_category` when `browser_entries` was last built.
+    pub(crate) browser_entries_cat: Option<Category>,
+    /// Lowercased value of `browser_search` when `browser_entries` was last built.
+    pub(crate) browser_entries_search: String,
+    /// Cached `TextureHandle`s for pattern previews, keyed by pattern name.
+    /// User-pattern keys are prefixed with `"user:"` to allow targeted invalidation.
+    pub(crate) preview_textures: HashMap<String, egui::TextureHandle>,
 }
 
 impl GameOfLifeApp {
@@ -37,7 +59,7 @@ impl GameOfLifeApp {
         let user_patterns = user_patterns_dir()
             .map(|dir| load_user_patterns(&dir))
             .unwrap_or_default();
-        Self {
+        let mut app = Self {
             sim: Simulation::new(),
             camera: Camera::new(),
             drag_paint_state: None,
@@ -46,7 +68,13 @@ impl GameOfLifeApp {
             user_patterns,
             save_popup_open: false,
             save_name: String::new(),
-        }
+            browser_entries: Vec::new(),
+            browser_entries_cat: None,
+            browser_entries_search: String::new(),
+            preview_textures: HashMap::new(),
+        };
+        app.rebuild_browser_entries();
+        app
     }
 
     /// Returns the absolute path to the user patterns directory and ensures it exists.
@@ -63,6 +91,44 @@ impl GameOfLifeApp {
         self.user_patterns = user_patterns_dir()
             .map(|dir| load_user_patterns(&dir))
             .unwrap_or_default();
+        self.preview_textures.retain(|k, _| !k.starts_with("user:"));
+        self.rebuild_browser_entries();
+    }
+
+    /// Rebuilds `browser_entries` from the current filter state and saves those
+    /// values for change detection on subsequent frames.
+    pub(crate) fn rebuild_browser_entries(&mut self) {
+        let search_lower = self.browser_search.to_ascii_lowercase();
+        let filter_cat = self.browser_category;
+        self.browser_entries.clear();
+
+        let show_builtin = filter_cat.map(|c| c != Category::Custom).unwrap_or(true);
+        if show_builtin {
+            for (i, (entry, _)) in decoded_library().iter().enumerate() {
+                if let Some(cat) = filter_cat
+                    && entry.category != cat
+                {
+                    continue;
+                }
+                if !search_lower.is_empty()
+                    && !entry.name.to_ascii_lowercase().contains(&search_lower)
+                {
+                    continue;
+                }
+                self.browser_entries.push(BrowserEntry::Library(i));
+            }
+        }
+        let show_custom = filter_cat.map(|c| c == Category::Custom).unwrap_or(true);
+        if show_custom {
+            for (i, (name, _)) in self.user_patterns.iter().enumerate() {
+                if !search_lower.is_empty() && !name.to_ascii_lowercase().contains(&search_lower) {
+                    continue;
+                }
+                self.browser_entries.push(BrowserEntry::User(i));
+            }
+        }
+        self.browser_entries_cat = filter_cat;
+        self.browser_entries_search = search_lower;
     }
 
     /// Advances the simulation by as many steps as `dt` seconds warrant at the current speed,

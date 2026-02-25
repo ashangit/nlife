@@ -42,35 +42,6 @@ highest to lowest impact / easiest to hardest.
 
 ---
 
-## 2. Performance — Pattern Browser
-
-- [ ] **Virtual scrolling** — all matching patterns (potentially 1 000+) are currently
-  allocated in the egui layout every frame, even when only ~10 rows are visible.  Replace
-  the inner `for` loops with `egui::ScrollArea::show_rows(row_height, total_rows, |ui, range| { … })`
-  so egui only invokes the closure for the visible row range.  This requires knowing the
-  total filtered count and mapping row indices back to library entries, so build a
-  `Vec<BrowserRow>` index (built-in + custom, post-filter) once per filter change.
-
-- [ ] **Cached preview images** — `draw_preview()` recomputes the bounding box, scale
-  factor, and origin for every visible pattern on every frame, then issues O(live_cells)
-  `painter.rect_filled` calls.  Pre-render each pattern to an `egui::ColorImage` (40×40
-  RGBA) once, upload it as a retained `egui::TextureHandle` (stored in a
-  `HashMap<String, TextureHandle>` on `GameOfLifeApp`), and display with a single
-  `ui.image()` call.  Cache invalidation: re-render when user patterns change.
-
-- [ ] **Pre-filtered index with change detection** — the browser re-filters the full library
-  on every frame by iterating all entries and checking category + name.  Instead, cache a
-  `Vec<usize>` of matching indices and only recompute it when `browser_category` or
-  `browser_search` change (compare against the values used to build the last cache).  With
-  virtual scrolling this cache is the total-row count needed by `show_rows`.
-
-- [ ] **Lazy `decoded_library` access** — `decoded_library()` decodes all entries once into
-  a `Vec` via `OnceLock`, but the browser still walks the full slice.  Once virtual
-  scrolling + a pre-filtered index are in place, only O(visible_rows) entries will be
-  accessed per frame, so the remaining cost is dominated by the texture lookup, which is O(1).
-
----
-
 ## 4. UI / UX Improvements
 
 - [ ] **Cell coordinate tooltip** — show `(row, col)` in a tooltip or status bar when

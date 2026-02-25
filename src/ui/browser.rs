@@ -1,9 +1,10 @@
-use egui::{Painter, Pos2, Rect, Sense, Vec2};
+use std::collections::HashMap;
 
-use crate::app::GameOfLifeApp;
+use egui::{Color32, ColorImage, Pos2, Rect, Sense, TextureOptions, Vec2};
+
+use crate::app::{BrowserEntry, GameOfLifeApp};
 use crate::library::{Category, decoded_library};
 use crate::rle::write_cells;
-use crate::ui::grid_view::{COLOR_ALIVE, COLOR_BG};
 
 /// Width of the live-cell preview canvas inside each browser row.
 const PREVIEW_SIZE: f32 = 40.0;
@@ -99,67 +100,58 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
 
             ui.separator();
 
-            // Snapshot filter fields before the scroll closure to avoid
-            // simultaneous &mut + & borrows on `app`.
+            // Rebuild filtered index when filter changes (O(1) most frames).
             let search_lower = app.browser_search.to_ascii_lowercase();
-            let filter_cat = app.browser_category;
+            if app.browser_category != app.browser_entries_cat
+                || search_lower != app.browser_entries_search
+            {
+                app.rebuild_browser_entries();
+            }
 
-            // ── Scrollable pattern list ───────────────────────────────────────
-            egui::ScrollArea::vertical()
-                .auto_shrink([false; 2])
-                .show(ui, |ui| {
-                    // Built-in library entries
-                    let show_builtin = filter_cat.map(|c| c != Category::Custom).unwrap_or(true);
-                    if show_builtin {
-                        for (entry, cells) in decoded_library() {
-                            if let Some(cat) = filter_cat
-                                && entry.category != cat
-                            {
-                                continue;
-                            }
-                            if !search_lower.is_empty()
-                                && !entry.name.to_ascii_lowercase().contains(&search_lower)
-                            {
-                                continue;
-                            }
+            // Split into disjoint field borrows so the scroll closure can mutate
+            // `preview_textures` while reading `browser_entries` and `user_patterns`.
+            let mut to_load: Option<Vec<(i32, i32)>> = None;
+            {
+                let entries = &app.browser_entries;
+                let user_patterns = &app.user_patterns;
+                let textures = &mut app.preview_textures;
+
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false; 2])
+                    .show_rows(ui, PREVIEW_SIZE, entries.len(), |ui, row_range| {
+                        for row_idx in row_range {
+                            let (name, cells, tex_key): (&str, &[(i32, i32)], String) =
+                                match &entries[row_idx] {
+                                    BrowserEntry::Library(i) => {
+                                        let (e, c) = &decoded_library()[*i];
+                                        (e.name, c.as_slice(), e.name.to_owned())
+                                    }
+                                    BrowserEntry::User(i) => {
+                                        let (n, c) = &user_patterns[*i];
+                                        (n.as_str(), c.as_slice(), format!("user:{n}"))
+                                    }
+                                };
+                            let tex_id =
+                                get_or_create_texture(textures, ui.ctx(), &tex_key, cells).id();
                             ui.horizontal(|ui| {
                                 let (rect, _) = ui
                                     .allocate_exact_size(Vec2::splat(PREVIEW_SIZE), Sense::hover());
-                                draw_preview(&ui.painter_at(rect), rect, cells);
-                                if ui.button(entry.name).clicked() {
-                                    app.sim.load_cells(cells);
+                                ui.painter_at(rect).image(
+                                    tex_id,
+                                    rect,
+                                    Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)),
+                                    Color32::WHITE,
+                                );
+                                if ui.button(name).clicked() {
+                                    to_load = Some(cells.to_vec());
                                 }
                             });
                         }
-                    }
-
-                    // User-saved (Custom) entries
-                    let show_custom = filter_cat.map(|c| c == Category::Custom).unwrap_or(true);
-                    if show_custom {
-                        // Collect matching names and cells to avoid re-borrowing
-                        // app.user_patterns mutably during the loop.
-                        let matches: Vec<(String, Vec<(i32, i32)>)> = app
-                            .user_patterns
-                            .iter()
-                            .filter(|(name, _)| {
-                                search_lower.is_empty()
-                                    || name.to_ascii_lowercase().contains(&search_lower)
-                            })
-                            .map(|(name, cells)| (name.clone(), cells.clone()))
-                            .collect();
-
-                        for (name, cells) in &matches {
-                            ui.horizontal(|ui| {
-                                let (rect, _) = ui
-                                    .allocate_exact_size(Vec2::splat(PREVIEW_SIZE), Sense::hover());
-                                draw_preview(&ui.painter_at(rect), rect, cells);
-                                if ui.button(name.as_str()).clicked() {
-                                    app.sim.load_cells(cells);
-                                }
-                            });
-                        }
-                    }
-                });
+                    });
+            }
+            if let Some(cells) = to_load {
+                app.sim.load_cells(&cells);
+            }
         });
 }
 
@@ -227,52 +219,62 @@ fn category_label(cat: Option<Category>) -> &'static str {
     }
 }
 
-/// Renders a miniature Conway's Game of Life pattern into `rect`.
-///
-/// Fills the background with [`COLOR_BG`], then scales the cell bounding box
-/// to fit inside `rect` (with 2 px padding) and draws each live cell as a
-/// filled rectangle using [`COLOR_ALIVE`].  Does nothing except fill the
-/// background when `cells` is empty.
+/// Rasterises `cells` into a 40×40 `ColorImage` using the same scaling logic
+/// as the old painter approach, suitable for uploading to the GPU once.
 ///
 /// # Arguments
-/// * `painter` — egui painter clipped to `rect`
-/// * `rect`    — screen-space rectangle to draw into
-/// * `cells`   — centred `(row, col)` live-cell coordinates
-pub(crate) fn draw_preview(painter: &Painter, rect: Rect, cells: &[(i32, i32)]) {
-    painter.rect_filled(rect, 2.0, COLOR_BG);
+/// * `cells` — centred `(row, col)` live-cell coordinates
+fn render_preview_image(cells: &[(i32, i32)]) -> ColorImage {
+    const SIZE: usize = 40;
+    let bg = Color32::from_gray(30);
+    let fg = Color32::from_rgb(180, 230, 100);
+    let mut pixels = vec![bg; SIZE * SIZE];
 
     if cells.is_empty() {
-        return;
+        return ColorImage::new([SIZE, SIZE], pixels);
     }
-
     let row_min = cells.iter().map(|&(r, _)| r).min().unwrap();
     let row_max = cells.iter().map(|&(r, _)| r).max().unwrap();
     let col_min = cells.iter().map(|&(_, c)| c).min().unwrap();
     let col_max = cells.iter().map(|&(_, c)| c).max().unwrap();
-
     let bbox_rows = (row_max - row_min + 1) as f32;
     let bbox_cols = (col_max - col_min + 1) as f32;
-
     let pad = 2.0_f32;
-    let avail_w = (rect.width() - 2.0 * pad).max(1.0);
-    let avail_h = (rect.height() - 2.0 * pad).max(1.0);
-
-    let cell_size = (avail_w / bbox_cols).min(avail_h / bbox_rows).max(1.0);
-    let fill = (cell_size - 1.0).max(0.5);
-
-    // Centre the scaled pattern within the available area.
-    let origin_x = rect.min.x + pad + (avail_w - bbox_cols * cell_size) / 2.0;
-    let origin_y = rect.min.y + pad + (avail_h - bbox_rows * cell_size) / 2.0;
+    let avail = (SIZE as f32 - 2.0 * pad).max(1.0);
+    let cell_size = (avail / bbox_cols).min(avail / bbox_rows).max(1.0);
+    let fill_px = (cell_size - 1.0).max(0.5).ceil() as usize;
+    let origin_x = pad + (avail - bbox_cols * cell_size) / 2.0;
+    let origin_y = pad + (avail - bbox_rows * cell_size) / 2.0;
 
     for &(r, c) in cells {
-        let x = origin_x + (c - col_min) as f32 * cell_size;
-        let y = origin_y + (r - row_min) as f32 * cell_size;
-        painter.rect_filled(
-            Rect::from_min_size(Pos2::new(x, y), Vec2::splat(fill)),
-            0.0,
-            COLOR_ALIVE,
-        );
+        let x0 = (origin_x + (c - col_min) as f32 * cell_size) as usize;
+        let y0 = (origin_y + (r - row_min) as f32 * cell_size) as usize;
+        for dy in 0..fill_px {
+            for dx in 0..fill_px {
+                pixels[(y0 + dy).min(SIZE - 1) * SIZE + (x0 + dx).min(SIZE - 1)] = fg;
+            }
+        }
     }
+    ColorImage::new([SIZE, SIZE], pixels)
+}
+
+/// Returns the cached `TextureHandle` for `key`, creating and uploading the
+/// preview image from `cells` on first call.
+///
+/// # Arguments
+/// * `textures` — mutable map of cached handles, keyed by pattern name
+/// * `ctx`      — egui context used for texture upload
+/// * `key`      — cache key (pattern name; user patterns prefixed with `"user:"`)
+/// * `cells`    — centred `(row, col)` live-cell coordinates used if creating
+fn get_or_create_texture<'a>(
+    textures: &'a mut HashMap<String, egui::TextureHandle>,
+    ctx: &egui::Context,
+    key: &str,
+    cells: &[(i32, i32)],
+) -> &'a egui::TextureHandle {
+    textures.entry(key.to_owned()).or_insert_with(|| {
+        ctx.load_texture(key, render_preview_image(cells), TextureOptions::NEAREST)
+    })
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
@@ -281,22 +283,24 @@ pub(crate) fn draw_preview(painter: &Painter, rect: Rect, cells: &[(i32, i32)]) 
 mod tests {
     use super::*;
 
-    /// draw_preview must not panic when given an empty cell list.
-    ///
-    /// Creates a no-op painter (via a dummy egui context in headless mode)
-    /// and verifies the function returns cleanly.
+    /// render_preview_image must not panic on empty input and must return the correct size
+    /// with all pixels set to the background colour.
     #[test]
-    fn test_draw_preview_empty_cells() {
-        let ctx = egui::Context::default();
-        ctx.begin_pass(egui::RawInput::default());
-        let layer_id = egui::LayerId::new(egui::Order::Background, egui::Id::new("test"));
-        let painter = egui::Painter::new(ctx.clone(), layer_id, Rect::EVERYTHING);
-        let rect = Rect::from_min_size(Pos2::ZERO, Vec2::splat(40.0));
+    fn test_render_preview_image_empty() {
+        let img = render_preview_image(&[]);
+        assert_eq!(img.size, [40, 40]);
+        let bg = Color32::from_gray(30);
+        assert!(img.pixels.iter().all(|&p| p == bg));
+    }
 
-        draw_preview(&painter, rect, &[]);
-        draw_preview(&painter, rect, &[(0, 0)]);
-
-        let _ = ctx.end_pass();
+    /// render_preview_image must not panic for a single cell and must produce at least one
+    /// foreground-coloured pixel.
+    #[test]
+    fn test_render_preview_image_single_cell() {
+        let img = render_preview_image(&[(0, 0)]);
+        assert_eq!(img.size, [40, 40]);
+        let fg = Color32::from_rgb(180, 230, 100);
+        assert!(img.pixels.iter().any(|&p| p == fg));
     }
 
     /// category_label returns the expected string for every variant including Custom.
