@@ -38,6 +38,15 @@ pub(crate) fn draw_grid(app: &mut GameOfLifeApp, ui: &mut egui::Ui) {
     // Paint cells (only those inside the visible viewport)
     let viewport = app.camera.viewport_rect;
     paint_cells(app, &painter, origin, viewport);
+
+    // Show cell coordinate tooltip on hover.
+    if let Some(hover_pos) = response.hover_pos()
+        && let Some((row, col)) =
+            app.camera
+                .pos_to_cell(hover_pos, origin, app.sim.grid.width, app.sim.grid.height)
+    {
+        response.on_hover_text_at_pointer(format!("({row}, {col})"));
+    }
 }
 
 /// Handles mouse click and drag events for painting/erasing cells on the grid.
