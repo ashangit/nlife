@@ -168,8 +168,8 @@ impl GameOfLifeApp {
         let s = self.camera.cell_size;
         let vp = self.camera.viewport_rect.size();
         self.camera.scroll_offset = egui::Vec2::new(
-            (self.sim.grid.width as f32 * s / 2.0 - vp.x / 2.0).max(0.0),
-            (self.sim.grid.height as f32 * s / 2.0 - vp.y / 2.0).max(0.0),
+            (self.sim.width() as f32 * s / 2.0 - vp.x / 2.0).max(0.0),
+            (self.sim.height() as f32 * s / 2.0 - vp.y / 2.0).max(0.0),
         );
         self.pop_history.clear();
     }
@@ -184,7 +184,7 @@ impl GameOfLifeApp {
         let (t, l) = self.sim.advance(dt);
         self.camera.apply_expansion(t, l);
         // Track live-cell population history (max 128 samples).
-        self.pop_history.push_back(self.sim.grid.live_count());
+        self.pop_history.push_back(self.sim.population());
         if self.pop_history.len() > 128 {
             self.pop_history.pop_front();
         }

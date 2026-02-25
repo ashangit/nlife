@@ -1,6 +1,7 @@
 mod app;
 mod camera;
 mod grid;
+mod hashlife;
 mod input;
 mod library;
 mod rle;

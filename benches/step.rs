@@ -1,6 +1,7 @@
-//! Criterion microbenchmarks for `Grid::step()` and `Grid::expand_if_needed()`.
+//! Criterion microbenchmarks for `Grid::step()`, `Grid::expand_if_needed()`,
+//! and `HashLife::step_universe()`.
 //!
-//! The two pure-std modules are pulled in via `#[path]` so this binary crate
+//! The three pure-std modules are pulled in via `#[path]` so this binary crate
 //! can access them without a `src/lib.rs`.  `library.rs` is deliberately
 //! excluded because it depends on `crate::rle` and `env!("OUT_DIR")`; the four
 //! patterns needed here are embedded as inline RLE constants instead.
@@ -9,6 +10,8 @@
 
 #[path = "../src/grid.rs"]
 mod grid;
+#[path = "../src/hashlife.rs"]
+mod hashlife;
 #[allow(unused_imports)] // rle's #[cfg(test)] module imports super::* which is unused in bench context
 #[path = "../src/rle.rs"]
 mod rle;
@@ -18,6 +21,7 @@ use std::time::Duration;
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use grid::Grid;
+use hashlife::HashLife;
 use rle::{center_cells, parse_rle};
 
 // ── Embedded RLE constants ────────────────────────────────────────────────────
@@ -34,7 +38,7 @@ const PULSAR_RLE: &str = "2b3o3b3o2$o4bobo4bo$o4bobo4bo$o4bobo4bo$2b3o3b3o2$2b3o
 /// Gosper Glider Gun: 36 live cells; produces a glider stream.
 const GOSPER_GUN_RLE: &str = "24bo$22bobo$12b2o6b2o12b2o$11bo3bo4b2o12b2o$2o8bo5bo3b2o$2o8bo3bob2o4bobo$10bo5bo7bo$11bo3bo$12b2o!";
 
-// ── Helper ────────────────────────────────────────────────────────────────────
+// ── Helper: SWAR ──────────────────────────────────────────────────────────────
 
 /// Parse `rle` and place the resulting cells into a fresh `width × height` grid,
 /// centred at `(height/2, width/2)`.
@@ -77,6 +81,32 @@ fn make_random_grid(width: usize, height: usize, density_pct: u8, seed: u64) -> 
         }
     }
     g
+}
+
+// ── Helper: HashLife ──────────────────────────────────────────────────────────
+
+/// Parse `rle`, load the pattern into a fresh `HashLife` instance centred at
+/// `(half, half)`, and return it.
+///
+/// # Panics
+/// Panics if `rle` fails to parse.
+fn make_hashlife(rle: &str) -> HashLife {
+    let cells = center_cells(parse_rle(rle).expect("valid RLE").cells);
+    let mut hl = HashLife::new();
+    hl.set_cells(&cells);
+    hl
+}
+
+/// Seeds a `HashLife` instance with approximately `density_pct`% live cells
+/// using the same xorshift64 PRNG as `make_random_grid` (same `seed`).
+///
+/// # Arguments
+/// * `density_pct` — target live-cell percentage (0–100)
+/// * `seed`        — xorshift64 seed (must be non-zero)
+fn make_random_hashlife(density_pct: u8, seed: u64) -> HashLife {
+    let mut hl = HashLife::new();
+    hl.fill_random(density_pct, seed);
+    hl
 }
 
 // ── Benchmark group: Grid::step() ────────────────────────────────────────────
@@ -199,5 +229,79 @@ fn bench_grid_expand(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_grid_step, bench_grid_expand);
+// ── Benchmark group: HashLife::step_universe() ────────────────────────────────
+
+/// Benchmark `HashLife::step_universe()` for three patterns, comparing with
+/// SWAR equivalents where applicable.
+///
+/// Each `step_universe()` call advances by `2^(level-2)` generations.  The
+/// patterns are pre-warmed to a stable repeating state so the cache is hot,
+/// which reflects real usage where HashLife's memoisation provides the
+/// greatest advantage.
+fn bench_hashlife(c: &mut Criterion) {
+    let mut group = c.benchmark_group("hashlife");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    // ── gosper_gun ─────────────────────────────────────────────────────────────
+    // Gosper Glider Gun: periodic gun + streaming gliders.
+    // After a few initial step_universe calls the cache is warm and each call
+    // is extremely fast (O(log N) unique sub-patterns).
+    group.bench_function("gosper_gun_step_universe", |b| {
+        b.iter_batched(
+            || {
+                let mut hl = make_hashlife(GOSPER_GUN_RLE);
+                // Warm up the cache.
+                for _ in 0..3 {
+                    hl.step_universe();
+                }
+                hl
+            },
+            |mut hl| {
+                hl.step_universe();
+                black_box(());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // ── pulsar ────────────────────────────────────────────────────────────────
+    // Period-3 oscillator; HashLife resolves it with perfect memoisation.
+    group.bench_function("pulsar_step_universe", |b| {
+        b.iter_batched(
+            || {
+                let mut hl = make_hashlife(PULSAR_RLE);
+                for _ in 0..3 {
+                    hl.step_universe();
+                }
+                hl
+            },
+            |mut hl| {
+                hl.step_universe();
+                black_box(());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // ── large_soup_1gen ───────────────────────────────────────────────────────
+    // 256×256 random soup at 20 % density, 1 step_universe call (cold cache).
+    // Contrasts HashLife's overhead vs SWAR for chaotic patterns.
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
+    group.bench_function("large_soup_1gen", |b| {
+        b.iter_batched(
+            || make_random_hashlife(20, 0xDEAD_BEEF_1234_5678),
+            |mut hl| {
+                hl.step_universe();
+                black_box(());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_grid_step, bench_grid_expand, bench_hashlife);
 criterion_main!(benches);

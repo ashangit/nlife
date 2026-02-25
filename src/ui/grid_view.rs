@@ -25,8 +25,8 @@ const COLOR_GRID_LINE: Color32 = Color32::from_gray(60);
 /// * `ui`  — egui UI context for the central panel
 pub(crate) fn draw_grid(app: &mut GameOfLifeApp, ui: &mut egui::Ui) {
     let desired = Vec2::new(
-        (app.sim.grid.width as f32) * app.camera.cell_size,
-        (app.sim.grid.height as f32) * app.camera.cell_size,
+        (app.sim.width() as f32) * app.camera.cell_size,
+        (app.sim.height() as f32) * app.camera.cell_size,
     );
 
     let (response, painter) = ui.allocate_painter(desired, Sense::click_and_drag());
@@ -52,7 +52,7 @@ pub(crate) fn draw_grid(app: &mut GameOfLifeApp, ui: &mut egui::Ui) {
     if let Some(hover_pos) = response.hover_pos()
         && let Some((row, col)) =
             app.camera
-                .pos_to_cell(hover_pos, origin, app.sim.grid.width, app.sim.grid.height)
+                .pos_to_cell(hover_pos, origin, app.sim.width(), app.sim.height())
     {
         response.on_hover_text_at_pointer(format!("({row}, {col})"));
     }
@@ -68,14 +68,14 @@ pub(crate) fn draw_grid(app: &mut GameOfLifeApp, ui: &mut egui::Ui) {
 /// * `response` — egui response for the canvas widget
 /// * `origin`   — screen-space top-left corner of the grid canvas
 fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2) {
-    let (w, h) = (app.sim.grid.width, app.sim.grid.height);
+    let (w, h) = (app.sim.width(), app.sim.height());
 
     // Handle single click (press+release without drag)
     if response.clicked()
         && let Some(pos) = response.interact_pointer_pos()
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
     {
-        app.sim.grid.toggle(row, col);
+        app.sim.toggle(row, col);
     }
 
     if response.drag_started()
@@ -83,9 +83,9 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
     {
         // The new state is the opposite of the current cell state
-        let old_state = app.sim.grid.get(row, col);
+        let old_state = app.sim.get(row, col);
         app.drag_paint_state = Some(!old_state);
-        app.sim.grid.toggle(row, col);
+        app.sim.toggle(row, col);
     }
 
     if response.dragged()
@@ -93,7 +93,7 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
             (response.interact_pointer_pos(), app.drag_paint_state)
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
     {
-        app.sim.grid.set(row, col, paint_alive);
+        app.sim.set(row, col, paint_alive);
     }
 
     if response.drag_stopped() {
@@ -103,9 +103,12 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
 
 /// Renders only the cells that intersect `viewport` to the painter.
 ///
-/// Computes the visible row/column range from the viewport rectangle and the
-/// canvas `origin` so that off-screen cells are never submitted to the painter,
-/// reducing CPU draw-call cost proportionally to the zoom level.
+/// **SWAR mode**: iterates every `(row, col)` in the visible range and paints
+/// `COLOR_ALIVE` or `COLOR_DEAD` for each cell — O(viewport area).
+///
+/// **HashLife mode**: fills the visible grid area with `COLOR_DEAD` then calls
+/// `sim.live_cells_in_viewport` and paints only those cells `COLOR_ALIVE` —
+/// O(live cells in viewport + tree depth).
 ///
 /// # Arguments
 /// * `app`      — application state (read-only access to grid and camera)
@@ -118,21 +121,42 @@ fn paint_cells(app: &GameOfLifeApp, painter: &Painter, origin: Pos2, viewport: e
 
     // Project viewport edges into grid coordinates to find the visible range.
     let col_min = ((viewport.min.x - origin.x) / s).floor().max(0.0) as usize;
-    let col_max = (((viewport.max.x - origin.x) / s).ceil() as usize).min(app.sim.grid.width);
+    let col_max = (((viewport.max.x - origin.x) / s).ceil() as usize).min(app.sim.width());
     let row_min = ((viewport.min.y - origin.y) / s).floor().max(0.0) as usize;
-    let row_max = (((viewport.max.y - origin.y) / s).ceil() as usize).min(app.sim.grid.height);
+    let row_max = (((viewport.max.y - origin.y) / s).ceil() as usize).min(app.sim.height());
 
-    for row in row_min..row_max {
-        for col in col_min..col_max {
+    if app.sim.is_hashlife() {
+        // HashLife: fill visible grid area with dead colour, then draw sparse live cells.
+        let x_start = origin.x + col_min as f32 * s;
+        let y_start = origin.y + row_min as f32 * s;
+        let x_end = origin.x + col_max as f32 * s;
+        let y_end = origin.y + row_max as f32 * s;
+        let dead_area = Rect::from_min_max(Pos2::new(x_start, y_start), Pos2::new(x_end, y_end));
+        painter.rect_filled(dead_area, 0.0, COLOR_DEAD);
+
+        for (row, col) in app
+            .sim
+            .live_cells_in_viewport(row_min, col_min, row_max, col_max)
+        {
             let x = origin.x + col as f32 * s;
             let y = origin.y + row as f32 * s;
             let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(fill_size));
-            let color = if app.sim.grid.get(row, col) {
-                COLOR_ALIVE
-            } else {
-                COLOR_DEAD
-            };
-            painter.rect_filled(rect, 0.0, color);
+            painter.rect_filled(rect, 0.0, COLOR_ALIVE);
+        }
+    } else {
+        // SWAR: iterate every visible cell and paint alive or dead.
+        for row in row_min..row_max {
+            for col in col_min..col_max {
+                let x = origin.x + col as f32 * s;
+                let y = origin.y + row as f32 * s;
+                let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(fill_size));
+                let color = if app.sim.get(row, col) {
+                    COLOR_ALIVE
+                } else {
+                    COLOR_DEAD
+                };
+                painter.rect_filled(rect, 0.0, color);
+            }
         }
     }
 }
@@ -154,12 +178,10 @@ fn paint_grid_lines(app: &GameOfLifeApp, painter: &Painter, origin: Pos2, viewpo
 
     // Visible column range.
     let col_min = ((viewport.min.x - origin.x) / s).floor().max(0.0) as usize;
-    let col_max =
-        (((viewport.max.x - origin.x) / s).ceil() as usize + 1).min(app.sim.grid.width + 1);
+    let col_max = (((viewport.max.x - origin.x) / s).ceil() as usize + 1).min(app.sim.width() + 1);
     // Visible row range.
     let row_min = ((viewport.min.y - origin.y) / s).floor().max(0.0) as usize;
-    let row_max =
-        (((viewport.max.y - origin.y) / s).ceil() as usize + 1).min(app.sim.grid.height + 1);
+    let row_max = (((viewport.max.y - origin.y) / s).ceil() as usize + 1).min(app.sim.height() + 1);
 
     let x_start = origin.x + col_min as f32 * s;
     let x_end = origin.x + (col_max - 1) as f32 * s;

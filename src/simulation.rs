@@ -1,6 +1,7 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::grid::Grid;
+use crate::hashlife::HashLife;
 
 /// Initial grid width in cells.
 const GRID_COLS: usize = 100;
@@ -11,13 +12,31 @@ const LOAD_MARGIN: usize = 40;
 /// Default simulation speed in generations per second.
 const DEFAULT_SPEED: f64 = 10.0;
 
+// ── Engine ────────────────────────────────────────────────────────────────────
+
+/// Selects which simulation backend is active.
+///
+/// `Swar` uses the bit-packed SWAR (SIMD Within A Register) engine from
+/// [`Grid`]; `HashLife` uses the quadtree-memoised engine that can advance
+/// many generations at once for periodic or repetitive patterns.
+pub(crate) enum Engine {
+    /// Bit-packed frontier-based SWAR engine.
+    Swar(Grid),
+    /// Quadtree-memoised HashLife engine (heap-allocated to keep the enum small).
+    HashLife(Box<HashLife>),
+}
+
+// ── Simulation ────────────────────────────────────────────────────────────────
+
 /// Pure simulation state — no egui dependency.
 ///
-/// Holds the grid, timing, and run-control fields that are independent of
-/// how the result is rendered.
+/// Holds the active simulation engine plus timing and run-control fields that
+/// are independent of how the result is rendered.  All grid access goes through
+/// the proxy methods (`width`, `height`, `get`, `set`, …) which dispatch to
+/// whichever [`Engine`] is currently selected.
 pub(crate) struct Simulation {
-    /// The game grid.
-    pub(crate) grid: Grid,
+    /// Active simulation engine.
+    pub(crate) engine: Engine,
     /// Total generations since last clear/pattern load.
     pub(crate) generation: u64,
     /// Whether the simulation is currently running.
@@ -31,10 +50,10 @@ pub(crate) struct Simulation {
 }
 
 impl Simulation {
-    /// Creates a Simulation with a fresh 100×60 grid and default settings.
+    /// Creates a `Simulation` with a fresh SWAR grid (100×60) and default settings.
     pub(crate) fn new() -> Self {
         Self {
-            grid: Grid::new(GRID_COLS, GRID_ROWS),
+            engine: Engine::Swar(Grid::new(GRID_COLS, GRID_ROWS)),
             generation: 0,
             running: false,
             speed: DEFAULT_SPEED,
@@ -43,40 +62,174 @@ impl Simulation {
         }
     }
 
+    // ── Engine-proxy accessors ────────────────────────────────────────────────
+
+    /// Returns the grid width in cells.
+    pub(crate) fn width(&self) -> usize {
+        match &self.engine {
+            Engine::Swar(g) => g.width,
+            Engine::HashLife(hl) => hl.width(),
+        }
+    }
+
+    /// Returns the grid height in cells.
+    pub(crate) fn height(&self) -> usize {
+        match &self.engine {
+            Engine::Swar(g) => g.height,
+            Engine::HashLife(hl) => hl.height(),
+        }
+    }
+
+    /// Returns the alive/dead state of the cell at `(row, col)`.
+    ///
+    /// Returns `false` for out-of-bounds coordinates.
+    pub(crate) fn get(&self, row: usize, col: usize) -> bool {
+        match &self.engine {
+            Engine::Swar(g) => g.get(row, col),
+            Engine::HashLife(hl) => hl.get(row, col),
+        }
+    }
+
+    /// Sets the alive/dead state of the cell at `(row, col)`.
+    ///
+    /// Does nothing for out-of-bounds coordinates.
+    pub(crate) fn set(&mut self, row: usize, col: usize, alive: bool) {
+        match &mut self.engine {
+            Engine::Swar(g) => g.set(row, col, alive),
+            Engine::HashLife(hl) => hl.set(row, col, alive),
+        }
+    }
+
+    /// Toggles the alive/dead state of the cell at `(row, col)`.
+    ///
+    /// Does nothing for out-of-bounds coordinates.
+    pub(crate) fn toggle(&mut self, row: usize, col: usize) {
+        match &mut self.engine {
+            Engine::Swar(g) => g.toggle(row, col),
+            Engine::HashLife(hl) => hl.toggle(row, col),
+        }
+    }
+
+    /// Returns the total live-cell count.
+    pub(crate) fn population(&self) -> u64 {
+        match &self.engine {
+            Engine::Swar(g) => g.live_count(),
+            Engine::HashLife(hl) => hl.population(),
+        }
+    }
+
+    /// Returns the tight bounding box `[row_min, col_min, row_max, col_max]`
+    /// (inclusive) of all live cells, or `None` if the grid is empty.
+    #[allow(dead_code)]
+    pub(crate) fn live_bbox(&self) -> Option<[usize; 4]> {
+        match &self.engine {
+            Engine::Swar(g) => g.live_bbox,
+            Engine::HashLife(hl) => hl.live_bbox(),
+        }
+    }
+
+    /// Returns all live cells as centred `(row_offset, col_offset)` pairs,
+    /// compatible with [`load_cells`](Simulation::load_cells).
+    pub(crate) fn live_cells_offsets(&self) -> Vec<(i32, i32)> {
+        match &self.engine {
+            Engine::Swar(g) => g.live_cells_offsets(),
+            Engine::HashLife(hl) => hl.live_cells_offsets(),
+        }
+    }
+
+    /// Returns all live cells as `(row, col)` pairs normalised so the
+    /// top-left of the bounding box is `(0, 0)`.  Intended for saving to disk.
+    pub(crate) fn live_cells_for_save(&self) -> Vec<(usize, usize)> {
+        match &self.engine {
+            Engine::Swar(g) => {
+                let live: Vec<(usize, usize)> = (0..g.height)
+                    .flat_map(|r| (0..g.width).map(move |c| (r, c)))
+                    .filter(|&(r, c)| g.get(r, c))
+                    .collect();
+                if live.is_empty() {
+                    return live;
+                }
+                let row_min = live.iter().map(|&(r, _)| r).min().unwrap();
+                let col_min = live.iter().map(|&(_, c)| c).min().unwrap();
+                live.iter()
+                    .map(|&(r, c)| (r - row_min, c - col_min))
+                    .collect()
+            }
+            Engine::HashLife(hl) => hl.live_cells_for_save(),
+        }
+    }
+
+    /// Returns all live cells within `[row_min, row_max) × [col_min, col_max)`.
+    ///
+    /// For SWAR, iterates and collects.  For HashLife, uses tree traversal.
+    pub(crate) fn live_cells_in_viewport(
+        &self,
+        row_min: usize,
+        col_min: usize,
+        row_max: usize,
+        col_max: usize,
+    ) -> Vec<(usize, usize)> {
+        match &self.engine {
+            Engine::Swar(g) => {
+                let mut out = Vec::new();
+                for row in row_min..row_max {
+                    for col in col_min..col_max {
+                        if g.get(row, col) {
+                            out.push((row, col));
+                        }
+                    }
+                }
+                out
+            }
+            Engine::HashLife(hl) => hl.live_cells_in_viewport(row_min, col_min, row_max, col_max),
+        }
+    }
+
+    /// Returns `true` if the HashLife engine is currently active.
+    pub(crate) fn is_hashlife(&self) -> bool {
+        matches!(self.engine, Engine::HashLife(_))
+    }
+
+    // ── Lifecycle methods ─────────────────────────────────────────────────────
+
     /// Loads centred cell offsets as the new grid state, resets the generation
     /// counter, and stops the simulation.
     ///
-    /// The `cells` slice is passed directly to [`Grid::set_cells`], which
-    /// centres the pattern at `(height/2, width/2)`.
+    /// For SWAR, auto-resizes the grid if the pattern is larger than the
+    /// current dimensions.  For HashLife, [`HashLife::set_cells`] auto-sizes
+    /// internally.
     ///
     /// # Arguments
     /// * `cells` — centred `(row_offset, col_offset)` pairs as returned by
     ///   `decoded_library()` or `center_cells()`
     pub(crate) fn load_cells(&mut self, cells: &[(i32, i32)]) {
-        if !cells.is_empty() {
-            let min_dr = cells.iter().map(|&(dr, _)| dr).min().unwrap();
-            let max_dr = cells.iter().map(|&(dr, _)| dr).max().unwrap();
-            let min_dc = cells.iter().map(|&(_, dc)| dc).min().unwrap();
-            let max_dc = cells.iter().map(|&(_, dc)| dc).max().unwrap();
-            // Half-extents: how far from centre the pattern reaches in each direction.
-            let half_h = ((-min_dr).max(0) as usize).max((max_dr + 1).max(0) as usize);
-            let half_w = ((-min_dc).max(0) as usize).max((max_dc + 1).max(0) as usize);
-            let required_h = (2 * (half_h + LOAD_MARGIN)).max(GRID_ROWS);
-            let required_w = (2 * (half_w + LOAD_MARGIN)).max(GRID_COLS);
-            if required_h > self.grid.height || required_w > self.grid.width {
-                self.grid = Grid::new(required_w, required_h);
+        match &mut self.engine {
+            Engine::Swar(grid) => {
+                if !cells.is_empty() {
+                    let min_dr = cells.iter().map(|&(dr, _)| dr).min().unwrap();
+                    let max_dr = cells.iter().map(|&(dr, _)| dr).max().unwrap();
+                    let min_dc = cells.iter().map(|&(_, dc)| dc).min().unwrap();
+                    let max_dc = cells.iter().map(|&(_, dc)| dc).max().unwrap();
+                    let half_h = ((-min_dr).max(0) as usize).max((max_dr + 1).max(0) as usize);
+                    let half_w = ((-min_dc).max(0) as usize).max((max_dc + 1).max(0) as usize);
+                    let required_h = (2 * (half_h + LOAD_MARGIN)).max(GRID_ROWS);
+                    let required_w = (2 * (half_w + LOAD_MARGIN)).max(GRID_COLS);
+                    if required_h > grid.height || required_w > grid.width {
+                        *grid = Grid::new(required_w, required_h);
+                    }
+                }
+                grid.set_cells(cells);
+            }
+            Engine::HashLife(hl) => {
+                hl.set_cells(cells);
             }
         }
-        self.grid.set_cells(cells);
         self.generation = 0;
         self.running = false;
         self.time_since_last_step = 0.0;
     }
 
     /// Fills the grid randomly using a time-derived seed and resets the simulation.
-    ///
-    /// Derives the PRNG seed from `SystemTime::now()` so each call produces a
-    /// different pattern.  Resets `generation` and `time_since_last_step`.
     ///
     /// # Arguments
     /// * `density_pct` — percentage of cells to set alive (0–100)
@@ -85,34 +238,50 @@ impl Simulation {
             .duration_since(UNIX_EPOCH)
             .map(|d| d.subsec_nanos() as u64)
             .unwrap_or(1);
-        self.grid.fill_random(density_pct, seed);
+        match &mut self.engine {
+            Engine::Swar(g) => g.fill_random(density_pct, seed),
+            Engine::HashLife(hl) => hl.fill_random(density_pct, seed),
+        }
         self.generation = 0;
         self.time_since_last_step = 0.0;
     }
 
     /// Clears the grid, resets the generation counter, and stops the simulation.
     pub(crate) fn clear(&mut self) {
-        self.grid.clear();
+        match &mut self.engine {
+            Engine::Swar(g) => g.clear(),
+            Engine::HashLife(hl) => hl.clear(),
+        }
         self.generation = 0;
         self.running = false;
         self.time_since_last_step = 0.0;
     }
 
-    /// Advances the grid by one step and increments the generation counter.
+    /// Advances the active engine by one logical step and returns
+    /// `(add_top, add_left)` for scroll compensation.
     ///
-    /// Returns `(add_top, add_left)` from `expand_if_needed` for scroll compensation.
+    /// For SWAR, this is always 1 generation.  For HashLife, the generation
+    /// counter is incremented by `2^(level−2)` and the returned expansion is
+    /// equal on all four sides (symmetric grid growth).
     pub(crate) fn step_once(&mut self) -> (usize, usize) {
-        self.grid.step();
-        self.generation += 1;
-        self.grid.expand_if_needed()
+        match &mut self.engine {
+            Engine::Swar(grid) => {
+                grid.step();
+                self.generation += 1;
+                grid.expand_if_needed()
+            }
+            Engine::HashLife(hl) => {
+                let (gens, expansion) = hl.step_universe();
+                self.generation += gens;
+                (expansion, expansion)
+            }
+        }
     }
 
     /// Advances the simulation by as many steps as `dt` seconds warrant at the
     /// current speed.
     ///
-    /// Each timer tick runs `steps_per_frame` simulation steps. Returns the total
-    /// `(add_top, add_left)` expansion accumulated across all steps taken, for
-    /// scroll compensation by the caller.
+    /// Returns the total `(add_top, add_left)` expansion for scroll compensation.
     ///
     /// # Arguments
     /// * `dt` — elapsed time in seconds since the last call
@@ -131,47 +300,133 @@ impl Simulation {
         }
         (total_top, total_left)
     }
+
+    /// Switches between SWAR and HashLife engines, transferring the current
+    /// live cells.  Preserves `generation`.
+    ///
+    /// Switching to HashLife: the current pattern is extracted as centred
+    /// offsets and loaded into a new [`HashLife`] instance.
+    ///
+    /// Switching to SWAR: the inverse transfer with auto-resize identical to
+    /// [`load_cells`](Simulation::load_cells).
+    pub(crate) fn toggle_engine(&mut self) {
+        let cells = self.live_cells_offsets();
+        let saved_gen = self.generation;
+
+        self.engine = match &self.engine {
+            Engine::Swar(_) => {
+                let mut hl = Box::new(HashLife::new());
+                hl.set_cells(&cells);
+                Engine::HashLife(hl)
+            }
+            Engine::HashLife(_) => {
+                let mut grid = Grid::new(GRID_COLS, GRID_ROWS);
+                if !cells.is_empty() {
+                    let min_dr = cells.iter().map(|&(dr, _)| dr).min().unwrap();
+                    let max_dr = cells.iter().map(|&(dr, _)| dr).max().unwrap();
+                    let min_dc = cells.iter().map(|&(_, dc)| dc).min().unwrap();
+                    let max_dc = cells.iter().map(|&(_, dc)| dc).max().unwrap();
+                    let half_h = ((-min_dr).max(0) as usize).max((max_dr + 1).max(0) as usize);
+                    let half_w = ((-min_dc).max(0) as usize).max((max_dc + 1).max(0) as usize);
+                    let required_h = (2 * (half_h + LOAD_MARGIN)).max(GRID_ROWS);
+                    let required_w = (2 * (half_w + LOAD_MARGIN)).max(GRID_COLS);
+                    if required_h > grid.height || required_w > grid.width {
+                        grid = Grid::new(required_w, required_h);
+                    }
+                }
+                grid.set_cells(&cells);
+                Engine::Swar(grid)
+            }
+        };
+
+        self.generation = saved_gen;
+        self.time_since_last_step = 0.0;
+    }
 }
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Loading a pattern whose extents exceed the default 100×60 grid must resize
-    /// the grid to fit, with LOAD_MARGIN dead cells on each side.  No cells must
-    /// be silently clipped.
+    /// Loading a pattern whose extents exceed the default 100×60 SWAR grid must
+    /// resize the grid to fit, with LOAD_MARGIN dead cells on each side.
     #[test]
     fn test_load_cells_auto_resize() {
         let mut sim = Simulation::new();
-        // Pattern spans ±200 rows and ±200 cols from centre.
         let cells: Vec<(i32, i32)> = vec![(-200, -200), (-200, 200), (200, -200), (200, 200)];
         sim.load_cells(&cells);
 
-        // Grid must be at least 2*(200+1+LOAD_MARGIN) = 482 in each dimension.
         let min_dim = 2 * (201 + LOAD_MARGIN);
         assert!(
-            sim.grid.height >= min_dim,
+            sim.height() >= min_dim,
             "height {} < required {}",
-            sim.grid.height,
+            sim.height(),
             min_dim
         );
         assert!(
-            sim.grid.width >= min_dim,
+            sim.width() >= min_dim,
             "width {} < required {}",
-            sim.grid.width,
+            sim.width(),
             min_dim
         );
 
-        // All four corner cells must be alive — no clipping.
-        let origin_row = (sim.grid.height / 2) as i32;
-        let origin_col = (sim.grid.width / 2) as i32;
+        let origin_row = (sim.height() / 2) as i32;
+        let origin_col = (sim.width() / 2) as i32;
         for &(dr, dc) in &cells {
             let r = (origin_row + dr) as usize;
             let c = (origin_col + dc) as usize;
-            assert!(
-                sim.grid.get(r, c),
-                "cell ({r},{c}) should be alive but was dead"
-            );
+            assert!(sim.get(r, c), "cell ({r},{c}) should be alive but was dead");
         }
+    }
+
+    /// toggle_engine preserves the live-cell pattern (same offsets before and
+    /// after SWAR→HashLife→SWAR round-trip).
+    #[test]
+    fn test_toggle_engine_preserves_pattern() {
+        let mut sim = Simulation::new();
+        // Load a small L-shape.
+        sim.load_cells(&[(0, 0), (1, 0), (1, 1)]);
+        assert!(!sim.is_hashlife());
+
+        let before: std::collections::HashSet<_> = sim.live_cells_offsets().into_iter().collect();
+
+        sim.toggle_engine();
+        assert!(sim.is_hashlife());
+
+        sim.toggle_engine();
+        assert!(!sim.is_hashlife());
+
+        let after: std::collections::HashSet<_> = sim.live_cells_offsets().into_iter().collect();
+
+        assert_eq!(
+            before, after,
+            "pattern must survive SWAR→HL→SWAR round-trip"
+        );
+    }
+
+    /// toggle_engine preserves the generation counter.
+    #[test]
+    fn test_toggle_engine_preserves_generation() {
+        let mut sim = Simulation::new();
+        sim.generation = 42;
+        sim.toggle_engine();
+        assert_eq!(sim.generation, 42);
+        sim.toggle_engine();
+        assert_eq!(sim.generation, 42);
+    }
+
+    /// step_once on HashLife increments generation by more than 1.
+    #[test]
+    fn test_hashlife_step_increments_generation_by_step_size() {
+        let mut sim = Simulation::new();
+        sim.toggle_engine(); // switch to HashLife
+        let Engine::HashLife(ref hl) = sim.engine else {
+            panic!()
+        };
+        let expected = hl.step_size();
+        sim.step_once();
+        assert_eq!(sim.generation, expected);
     }
 }

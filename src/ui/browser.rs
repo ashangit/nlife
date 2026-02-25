@@ -229,26 +229,16 @@ fn save_user_pattern(app: &mut GameOfLifeApp) {
         return;
     };
 
-    // Collect live cells relative to their bounding box (top-left = 0,0).
-    let grid = &app.sim.grid;
-    let mut live: Vec<(i32, i32)> = (0..grid.height)
-        .flat_map(|r| (0..grid.width).map(move |c| (r, c)))
-        .filter(|&(r, c)| grid.get(r, c))
-        .map(|(r, c)| (r as i32, c as i32))
-        .collect();
-
-    if live.is_empty() {
+    // Collect live cells normalised to top-left = (0, 0).
+    let live_abs = app.sim.live_cells_for_save();
+    if live_abs.is_empty() {
         app.save_popup_open = false;
         return;
     }
-
-    // Normalise to top-left = (0, 0).
-    let row_min = live.iter().map(|&(r, _)| r).min().unwrap();
-    let col_min = live.iter().map(|&(_, c)| c).min().unwrap();
-    for cell in &mut live {
-        cell.0 -= row_min;
-        cell.1 -= col_min;
-    }
+    let live: Vec<(i32, i32)> = live_abs
+        .iter()
+        .map(|&(r, c)| (r as i32, c as i32))
+        .collect();
 
     let content = write_cells(&live, &name);
     let path = format!("{dir}/{name}.cells");

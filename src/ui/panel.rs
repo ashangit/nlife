@@ -7,7 +7,7 @@ use crate::camera::{DEFAULT_CELL_SIZE, ZOOM_STEP};
 const MAX_STEPS_PER_FRAME: u32 = 1024;
 
 /// Draws the top control panel with play/pause/step/clear buttons, speed slider,
-/// generation counter, zoom controls, and preset pattern buttons.
+/// generation counter, zoom controls, engine toggle, and file I/O buttons.
 ///
 /// # Arguments
 /// * `app` — mutable application state
@@ -49,7 +49,7 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             ui.label(format!("Gen: {}", app.sim.generation));
 
             ui.separator();
-            let pop = app.sim.grid.live_count();
+            let pop = app.sim.population();
             ui.label(format!("Pop: {pop}"));
             // Sparkline: 80×18 px canvas showing rolling population history.
             let (sparkline_rect, _) =
@@ -88,9 +88,32 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             }
 
             ui.separator();
+            // Engine toggle: SWAR ↔ HashLife.
+            ui.label("Engine:");
+            let is_hl = app.sim.is_hashlife();
+            if ui
+                .selectable_label(!is_hl, "SWAR")
+                .on_hover_text("Bit-packed frontier engine (O(live) per step)")
+                .clicked()
+                && is_hl
+            {
+                app.sim.toggle_engine();
+                app.center_camera_on_grid();
+            }
+            if ui
+                .selectable_label(is_hl, "HashLife")
+                .on_hover_text("Quadtree-memoised engine (O(log N) for periodic patterns)")
+                .clicked()
+                && !is_hl
+            {
+                app.sim.toggle_engine();
+                app.center_camera_on_grid();
+            }
+
+            ui.separator();
             // Save current grid as a .cells file chosen by the user.
             if ui.button("💾 Save").clicked() {
-                let offsets = app.sim.grid.live_cells_offsets();
+                let offsets = app.sim.live_cells_offsets();
                 if !offsets.is_empty()
                     && let Some(path) = rfd::FileDialog::new()
                         .add_filter("Plaintext cells", &["cells"])
