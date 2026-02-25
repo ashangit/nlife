@@ -420,19 +420,37 @@ impl HashLife {
         self.level = old_level + 1;
     }
 
-    /// Returns `true` if the outer-ring quadrants of the root children contain
-    /// live cells, indicating the pattern is too close to the boundary.
+    /// Returns `true` if any outer grandchild of the root contains live cells,
+    /// indicating the pattern is too close to the boundary for a correct step.
     ///
-    /// Specifically checks `nw.nw`, `ne.ne`, `sw.sw`, `se.se` pops.
+    /// For `step_recursive(root)` to produce a correct center result, the outer
+    /// three sub-quadrants of every root child must be all-dead.  The only safe
+    /// sub-quadrants are `nw.se`, `ne.sw`, `sw.ne`, and `se.nw` (the four inner
+    /// corners that together form the center half of the root).  All 12 outer
+    /// grandchildren must therefore be empty.
+    ///
+    /// The previous implementation only checked the 4 corner grandchildren
+    /// (`nw.nw`, `ne.ne`, `sw.sw`, `se.se`), missing patterns that reach the
+    /// edge-but-not-corner regions (e.g. `nw.ne`, `ne.nw`, `sw.se`, etc.).
     fn needs_expansion(&self) -> bool {
         let r = self.nodes[self.root as usize];
         let nw = self.nodes[r.nw as usize];
         let ne = self.nodes[r.ne as usize];
         let sw = self.nodes[r.sw as usize];
         let se = self.nodes[r.se as usize];
+        // All 12 outer grandchildren must be empty.
+        // Only nw.se / ne.sw / sw.ne / se.nw are safe interior quadrants.
         self.nodes[nw.nw as usize].pop > 0
+            || self.nodes[nw.ne as usize].pop > 0
+            || self.nodes[nw.sw as usize].pop > 0
+            || self.nodes[ne.nw as usize].pop > 0
             || self.nodes[ne.ne as usize].pop > 0
+            || self.nodes[ne.se as usize].pop > 0
+            || self.nodes[sw.nw as usize].pop > 0
             || self.nodes[sw.sw as usize].pop > 0
+            || self.nodes[sw.se as usize].pop > 0
+            || self.nodes[se.ne as usize].pop > 0
+            || self.nodes[se.sw as usize].pop > 0
             || self.nodes[se.se as usize].pop > 0
     }
 
@@ -1011,5 +1029,57 @@ mod tests {
     fn test_step_size() {
         let hl = HashLife::new();
         assert_eq!(hl.step_size(), 1u64 << (DEFAULT_LEVEL as u32 - 2));
+    }
+
+    /// A live cell in nw.ne (top-centre-left, NOT the corner nw.nw) must trigger
+    /// needs_expansion.  The old four-corner check missed this region, causing
+    /// step_recursive to run with a dirty boundary and produce wrong results for
+    /// patterns like the 6-engine cordership gun.
+    #[test]
+    fn test_needs_expansion_catches_edge_not_corner() {
+        let mut hl = HashLife::new();
+        // nw child covers rows [0..half), cols [0..half).
+        // nw.ne covers rows [0..quarter), cols [quarter..half) — NOT the corner.
+        let quarter = hl.width() / 4;
+        hl.set(0, quarter + 1, true); // row=0, col=quarter+1 → in nw.ne
+        assert!(
+            hl.needs_expansion(),
+            "cell in nw.ne must trigger needs_expansion (edge-but-not-corner bug)"
+        );
+    }
+
+    /// HashLife and SWAR must agree on population after the same number of
+    /// generations for a blinker.  Any boundary-expansion bug that corrupts
+    /// the step result would cause a population mismatch.
+    #[test]
+    fn test_hashlife_swar_agree_60_gens() {
+        use crate::grid::Grid;
+
+        // Vertical blinker centred in a 200×200 SWAR grid.
+        let mut swar = Grid::new(200, 200);
+        swar.set(99, 100, true);
+        swar.set(100, 100, true);
+        swar.set(101, 100, true);
+        for _ in 0..60 {
+            swar.step();
+            swar.expand_if_needed();
+        }
+
+        // Same blinker in HashLife (offsets relative to centre).
+        let mut hl = HashLife::new();
+        hl.set_cells(&[(-1, 0), (0, 0), (1, 0)]);
+        // Advance until generation ≥ 60.  step_universe may overshoot, but any
+        // even multiple of the blinker period (2) restores population to 3.
+        let mut total = 0u64;
+        while total < 60 {
+            let (g, _) = hl.step_universe();
+            total += g;
+        }
+
+        assert_eq!(
+            swar.live_count(),
+            hl.population(),
+            "SWAR and HashLife must agree after ≥60 blinker generations (total HL gens: {total})"
+        );
     }
 }
