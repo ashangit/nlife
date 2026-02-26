@@ -38,6 +38,11 @@ const PULSAR_RLE: &str = "2b3o3b3o2$o4bobo4bo$o4bobo4bo$o4bobo4bo$2b3o3b3o2$2b3o
 /// Gosper Glider Gun: 36 live cells; produces a glider stream.
 const GOSPER_GUN_RLE: &str = "24bo$22bobo$12b2o6b2o12b2o$11bo3bo4b2o12b2o$2o8bo5bo3b2o$2o8bo3bob2o4bobo$10bo5bo7bo$11bo3bo$12b2o!";
 
+/// 6-engine Cordership gun: true period-784 gun firing 6-engine Cordeships;
+/// bounding box ~1285×1065, complex multi-component frontier.
+const CORDERSHIP_GUN_RLE: &str =
+    include_str!("../src/patterns/gun/6-engine_cordership_gun.rle");
+
 // ── Helper: SWAR ──────────────────────────────────────────────────────────────
 
 /// Parse `rle` and place the resulting cells into a fresh `width × height` grid,
@@ -170,6 +175,23 @@ fn bench_grid_step(c: &mut Criterion) {
         );
     });
 
+    // ── cordership_gun_fresh ──────────────────────────────────────────────────
+    // Period-784 gun; ~1285×1065 bounding box loaded into a 1600×1200 grid.
+    // Exercises the SWAR frontier on a large, multi-component structured
+    // pattern (unlike the random-soup bench which is dense and chaotic).
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(20);
+    group.bench_function("cordership_gun_fresh", |b| {
+        b.iter_batched(
+            || make_grid(1600, 1200, CORDERSHIP_GUN_RLE),
+            |mut g| {
+                g.step();
+                black_box(());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
     // ── large_soup ────────────────────────────────────────────────────────────
     // 1024×1024 grid at 20 % density ≈ 209 k live cells, frontier ≈ 14 000 words.
     // Well above RAYON_THRESHOLD — exercises and validates the parallel path.
@@ -271,6 +293,26 @@ fn bench_hashlife(c: &mut Criterion) {
         b.iter_batched(
             || {
                 let mut hl = make_hashlife(PULSAR_RLE);
+                for _ in 0..3 {
+                    hl.step_universe();
+                }
+                hl
+            },
+            |mut hl| {
+                hl.step_universe();
+                black_box(());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // ── cordership_gun_step_universe ──────────────────────────────────────────
+    // Period-784 gun with a large, structured, periodic pattern — the ideal
+    // case for HashLife's memoisation.  Three warmup calls prime the cache.
+    group.bench_function("cordership_gun_step_universe", |b| {
+        b.iter_batched(
+            || {
+                let mut hl = make_hashlife(CORDERSHIP_GUN_RLE);
                 for _ in 0..3 {
                     hl.step_universe();
                 }
