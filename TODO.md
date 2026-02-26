@@ -5,6 +5,44 @@ highest to lowest impact / easiest to hardest.
 
 ---
 
+## 0. Profiling — before optimising, measure
+
+**0.1 — CPU flamegraph (SWAR, bench)**
+Run `cargo flamegraph --bench step -- --bench large_soup --profile-time 30`
+to produce `flamegraph.svg`. Validate which functions dominate: `step_word`,
+frontier sort/dedup, `add_word_neighborhood`, or Rayon scheduling overhead.
+Tools already installed: `flamegraph`, `perf`, `cargo-flamegraph`.
+
+**0.2 — CPU flamegraph (HashLife, bench)**
+Run `cargo flamegraph --bench step -- --bench cordership_gun_step_universe --profile-time 30`.
+Expected hotspots: `step_recursive` cache lookup, `make_node` hashing,
+`step_level2` bitops. Confirm before implementing 2.1–2.5.
+
+**0.3 — CPU flamegraph (running app)**
+Attach `perf record -F 997 -g -p $(pgrep newlife) -- sleep 10` to the app
+while running a large pattern at max speed. Convert with
+`perf script | inferno-collapse-perf | inferno-flamegraph > app_flamegraph.svg`.
+Reveals rendering vs simulation split and UI hotspots.
+
+**0.4 — Memory profile (SWAR)**
+Use `heaptrack cargo bench --bench step -- --bench large_soup` (or
+`valgrind --tool=massif`) to measure peak allocation and allocation rate for
+`Grid::step()`. Confirms whether `results_buf`/`next_frontier` reuse fully
+eliminates per-step heap traffic, or if other sources remain.
+
+**0.5 — Memory profile (HashLife)**
+Same tooling on `cordership_gun_step_universe`. Primary question: how fast
+does the node table grow, and what fraction of memory is live (reachable)
+vs dead (GC-collectable)? Informs priority of TODO 2.2.
+
+**0.6 — Cache miss analysis**
+Run `perf stat -e cache-misses,cache-references,instructions,cycles cargo bench
+--bench step -- --bench large_soup` for SWAR and
+`-- --bench cordership_gun_step_universe` for HashLife.
+Cache-miss rate per instruction guides layout optimisations (1.4, 2.3).
+
+---
+
 ## 1. Performance — SWAR Engine
 
 **1.1 — AVX2 / SIMD kernel**
