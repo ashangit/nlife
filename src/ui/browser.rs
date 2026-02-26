@@ -347,7 +347,7 @@ mod tests {
         let img = render_preview_image(&[(0, 0)]);
         assert_eq!(img.size, [40, 40]);
         let fg = Color32::from_rgb(180, 230, 100);
-        assert!(img.pixels.iter().any(|&p| p == fg));
+        assert!(img.pixels.contains(&fg));
     }
 
     /// category_label returns the expected string for every variant including Custom.

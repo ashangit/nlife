@@ -232,26 +232,6 @@ impl GameOfLifeApp {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_show_grid_lines_default() {
-        let app = GameOfLifeApp::new_for_test();
-        assert!(
-            !app.show_grid_lines,
-            "show_grid_lines should default to false"
-        );
-    }
-
-    #[test]
-    fn test_show_help_default() {
-        let app = GameOfLifeApp::new_for_test();
-        assert!(!app.show_help, "show_help should default to false");
-    }
-}
-
 impl eframe::App for GameOfLifeApp {
     /// Called every frame to update the simulation and render the UI.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
@@ -305,5 +285,25 @@ impl eframe::App for GameOfLifeApp {
                 self.show_help = false;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_show_grid_lines_default() {
+        let app = GameOfLifeApp::new_for_test();
+        assert!(
+            !app.show_grid_lines,
+            "show_grid_lines should default to false"
+        );
+    }
+
+    #[test]
+    fn test_show_help_default() {
+        let app = GameOfLifeApp::new_for_test();
+        assert!(!app.show_help, "show_help should default to false");
     }
 }

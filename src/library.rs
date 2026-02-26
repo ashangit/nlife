@@ -346,7 +346,7 @@ mod tests {
             for &(dr, dc) in cells_offsets {
                 let r = anchor_row + dr;
                 let c = anchor_col + dc;
-                if r >= 0 && r < 500 && c >= 0 && c < 500 {
+                if (0..500).contains(&r) && (0..500).contains(&c) {
                     g.set(r as usize, c as usize, true);
                 }
             }

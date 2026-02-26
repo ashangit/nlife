@@ -1,4 +1,4 @@
-.PHONY: all test build fmt lint run prod bench bench-compare release
+.PHONY: all test build fmt lint run prod bench bench-save bench-compare release
 
 # Default target: format, lint, build, and test
 all: fmt lint build test
@@ -31,7 +31,13 @@ prod:
 bench:
 	cargo bench --bench step
 
-## Compare two version baselines saved by `make release`.
+## Save benchmark baseline for the current version (reads version from Cargo.toml).
+bench-save:
+	@version=$$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1); \
+	echo "=== Saving benchmark baseline v$$version ==="; \
+	cargo bench --bench step -- --save-baseline v$$version
+
+## Compare two version baselines saved by `make bench-save`.
 ## Usage: make bench-compare old=1.0.0 new=1.1.0
 bench-compare:
 	@if [ -z "$(old)" ] || [ -z "$(new)" ]; then \
@@ -39,7 +45,7 @@ bench-compare:
 	fi
 	cargo bench --bench step -- --load-baseline v$(new) --baseline v$(old)
 
-## Release: bump version, benchmark, compare with previous release, commit, tag.
+## Release: bump version, commit, tag.
 ## Usage: make release bump=patch   (or minor / major)
 release:
 	@if [ -z "$(bump)" ]; then \
@@ -57,14 +63,6 @@ release:
 	esac; \
 	sed -i "s/^version *= *\"$$current\"/version = \"$$new\"/" Cargo.toml; \
 	cargo check -q; \
-	echo "=== Benchmarking v$$new ==="; \
-	cargo bench --bench step -- --save-baseline v$$new; \
-	echo "=== Comparing v$$current -> v$$new ==="; \
-	if find target/criterion -name "estimates.json" -path "*/v$$current/*" 2>/dev/null | grep -q .; then \
-	    cargo bench --bench step -- --load-baseline v$$new --baseline v$$current; \
-	else \
-	    echo "(no baseline for v$$current -- comparison skipped)"; \
-	fi; \
 	git add Cargo.toml; \
 	git commit -m "chore: bump version to v$$new"; \
 	git tag "v$$new"; \

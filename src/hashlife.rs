@@ -305,15 +305,6 @@ impl HashLife {
         self.nodes[self.root as usize].pop
     }
 
-    /// Computes the tight bounding box `[row_min, col_min, row_max, col_max]`
-    /// (all inclusive) of all live cells, or `None` if the universe is empty.
-    ///
-    /// Traverses the tree once, pruning all-dead branches.
-    #[allow(dead_code)]
-    pub(crate) fn live_bbox(&self) -> Option<[usize; 4]> {
-        self.compute_live_bbox(self.root, 0, 0, self.width())
-    }
-
     /// Returns the number of generations advanced by a single call to
     /// [`step_universe`](HashLife::step_universe): `2^(level−2)`.
     pub(crate) fn step_size(&self) -> u64 {
@@ -770,48 +761,14 @@ impl HashLife {
             out,
         );
     }
-
-    /// Recursively computes the tight bounding box of all live cells within
-    /// `node`'s region `[node_row, node_row+node_size) × [node_col, …)`.
-    ///
-    /// Returns `None` for all-dead subtrees.
-    #[allow(dead_code)]
-    fn compute_live_bbox(
-        &self,
-        node: NodeId,
-        node_row: usize,
-        node_col: usize,
-        node_size: usize,
-    ) -> Option<[usize; 4]> {
-        if self.nodes[node as usize].pop == 0 {
-            return None;
-        }
-        if node_size == 1 {
-            return Some([node_row, node_col, node_row, node_col]);
-        }
-        let half = node_size / 2;
-        let n = self.nodes[node as usize];
-        let bboxes = [
-            self.compute_live_bbox(n.nw, node_row, node_col, half),
-            self.compute_live_bbox(n.ne, node_row, node_col + half, half),
-            self.compute_live_bbox(n.sw, node_row + half, node_col, half),
-            self.compute_live_bbox(n.se, node_row + half, node_col + half, half),
-        ];
-        bboxes.into_iter().flatten().reduce(|a, b| {
-            [
-                a[0].min(b[0]),
-                a[1].min(b[1]),
-                a[2].max(b[2]),
-                a[3].max(b[3]),
-            ]
-        })
-    }
 }
 
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
+    // `super::*` resolves differently when included via #[path] in the bench binary
     use super::*;
 
     // ── Internals ─────────────────────────────────────────────────────────────
@@ -962,17 +919,6 @@ mod tests {
 
         hl.step_universe();
         assert_eq!(hl.population(), 4, "block must be a still life");
-    }
-
-    /// live_bbox returns None for empty grid, Some for live cells.
-    #[test]
-    fn test_live_bbox() {
-        let mut hl = HashLife::new();
-        assert_eq!(hl.live_bbox(), None);
-        let (r, c) = (10, 20);
-        hl.set(r, c, true);
-        let bbox = hl.live_bbox().unwrap();
-        assert_eq!(bbox, [r, c, r, c]);
     }
 
     /// live_cells_in_viewport returns only cells inside the query rectangle.

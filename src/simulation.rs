@@ -118,16 +118,6 @@ impl Simulation {
         }
     }
 
-    /// Returns the tight bounding box `[row_min, col_min, row_max, col_max]`
-    /// (inclusive) of all live cells, or `None` if the grid is empty.
-    #[allow(dead_code)]
-    pub(crate) fn live_bbox(&self) -> Option<[usize; 4]> {
-        match &self.engine {
-            Engine::Swar(g) => g.live_bbox,
-            Engine::HashLife(hl) => hl.live_bbox(),
-        }
-    }
-
     /// Returns all live cells as centred `(row_offset, col_offset)` pairs,
     /// compatible with [`load_cells`](Simulation::load_cells).
     pub(crate) fn live_cells_offsets(&self) -> Vec<(i32, i32)> {

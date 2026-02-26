@@ -775,11 +775,11 @@ mod tests {
             }
 
             // Center alive
-            let center_alive = cells[1 * wpr + 32 / 64] & (1u64 << 32) != 0;
+            let center_alive = cells[wpr] & (1u64 << 32) != 0;
             let expected_alive = n == 3 || (center_alive && n == 2);
 
-            let a = cells[0 * wpr];
-            let c = cells[1 * wpr];
+            let a = cells[0];
+            let c = cells[wpr];
             let b = cells[2 * wpr];
             let result = step_word(0, a, 0, 0, c, 0, 0, b, 0);
             let got = (result >> 32) & 1 != 0;
@@ -806,18 +806,18 @@ mod tests {
         let mut cells = vec![0u64; height * wpr];
 
         // Row 0: bits 63, 64, 65 set (spanning words 0 and 1).
-        cells[0 * wpr + 0] |= 1u64 << 63; // col 63
-        cells[0 * wpr + 1] |= 1u64 << 0; // col 64
-        cells[0 * wpr + 1] |= 1u64 << 1; // col 65
+        cells[0] |= 1u64 << 63; // col 63
+        cells[1] |= 1u64 << 0; // col 64
+        cells[1] |= 1u64 << 1; // col 65
 
         // Compute word 1 of row 1 using step_word.
-        let ap = cells[0 * wpr + 0]; // above-left word (word 0 of row 0)
-        let a = cells[0 * wpr + 1]; // above word (word 1 of row 0)
+        let ap = cells[0]; // above-left word (word 0 of row 0)
+        let a = cells[1]; // above word (word 1 of row 0)
         let an = 0u64; // above-right word (word 2, off-grid for col 128)
-        let cp = cells[1 * wpr + 0];
-        let c = cells[1 * wpr + 1];
+        let cp = cells[wpr];
+        let c = cells[wpr + 1];
         let cn = 0u64;
-        let bp = cells[2 * wpr + 0];
+        let bp = cells[2 * wpr];
         let b = cells[2 * wpr + 1];
         let bn = 0u64;
 
@@ -1088,8 +1088,8 @@ mod tests {
         g.set(0, 0, true);
         let offsets = g.live_cells_offsets();
         assert_eq!(offsets.len(), 1, "expected exactly one offset");
-        let origin_row = (40 / 2) as i32;
-        let origin_col = (40 / 2) as i32;
+        let origin_row = 40_i32 / 2;
+        let origin_col = 40_i32 / 2;
         assert_eq!(
             offsets[0],
             (-origin_row, -origin_col),

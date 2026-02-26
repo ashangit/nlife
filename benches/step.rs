@@ -40,8 +40,7 @@ const GOSPER_GUN_RLE: &str = "24bo$22bobo$12b2o6b2o12b2o$11bo3bo4b2o12b2o$2o8bo5
 
 /// 6-engine Cordership gun: true period-784 gun firing 6-engine Cordeships;
 /// bounding box ~1285×1065, complex multi-component frontier.
-const CORDERSHIP_GUN_RLE: &str =
-    include_str!("../src/patterns/gun/6-engine_cordership_gun.rle");
+const CORDERSHIP_GUN_RLE: &str = include_str!("../src/patterns/gun/6-engine_cordership_gun.rle");
 
 // ── Helper: SWAR ──────────────────────────────────────────────────────────────
 
@@ -309,6 +308,9 @@ fn bench_hashlife(c: &mut Criterion) {
     // ── cordership_gun_step_universe ──────────────────────────────────────────
     // Period-784 gun with a large, structured, periodic pattern — the ideal
     // case for HashLife's memoisation.  Three warmup calls prime the cache.
+    // Setup (3 warmup step_universe calls) is expensive; 15 s / 20 samples.
+    group.measurement_time(Duration::from_secs(15));
+    group.sample_size(20);
     group.bench_function("cordership_gun_step_universe", |b| {
         b.iter_batched(
             || {
