@@ -94,15 +94,6 @@ highest to lowest impact / easiest to hardest.
 
 ---
 
-## 1. Performance — SWAR Engine
-
-**1.2 — Tiled grid layout for cache locality**
-L1-dcache-load-misses: 995M for the large soup. A tiled layout (8-row × 1-word
-tiles) keeps a word and its row-neighbours in the same cache line. Lower
-priority given the already-acceptable 3.84% miss rate.
-
----
-
 ## 2. Performance — HashLife Engine
 
 **2.1 — Open-addressing node intern table** ★ *Root cause of 32% cache-miss rate*

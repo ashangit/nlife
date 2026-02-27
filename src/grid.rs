@@ -12,6 +12,41 @@ const MARGIN: usize = 20;
 /// ≈ 6 200 words at 4 threads; 4 000 chosen conservatively.
 const RAYON_THRESHOLD: usize = 4_000;
 
+/// Number of rows per cache-line tile in the tiled storage layout.
+///
+/// Eight `u64` words (8 × 8 bytes = 64 bytes) fill exactly one cache line.
+/// Storing eight consecutive row values for the same word-column in a tile
+/// means vertical neighbours (row±1, wi) share a cache line with (row, wi).
+const TILE_HEIGHT: usize = 8;
+
+/// Returns the flat index into the tiled cell buffer for word `(row, wi)`.
+///
+/// Words at `(row-1, wi)`, `(row, wi)`, `(row+1, wi)` are consecutive within
+/// the same tile when `row % TILE_HEIGHT` is not 0 or 7, keeping `compute_word`
+/// vertical loads on the same cache line.
+///
+/// # Arguments
+/// * `row` — grid row index
+/// * `wi`  — word-column index (0 ≤ wi < wpr)
+/// * `wpr` — words per row (`words_per_row`)
+#[inline]
+fn tiled_idx(row: usize, wi: usize, wpr: usize) -> usize {
+    (row / TILE_HEIGHT) * (wpr * TILE_HEIGHT) + wi * TILE_HEIGHT + (row % TILE_HEIGHT)
+}
+
+/// Returns the number of `u64` words required for the tiled layout.
+///
+/// Rounds `height` up to the next multiple of `TILE_HEIGHT` so every tile is
+/// fully allocated.  Extra slots beyond row `height-1` are always zero.
+///
+/// # Arguments
+/// * `height` — number of grid rows
+/// * `wpr`    — words per row
+#[inline]
+fn tiled_size(height: usize, wpr: usize) -> usize {
+    height.div_ceil(TILE_HEIGHT) * TILE_HEIGHT * wpr
+}
+
 // ── Bit-manipulation helpers ──────────────────────────────────────────────────
 
 /// Returns `true` if the bit at `(row, col)` is set in the bit-packed slice.
@@ -22,7 +57,7 @@ const RAYON_THRESHOLD: usize = 4_000;
 /// * `row`, `col`    — cell coordinates
 #[inline]
 fn get_bit(cells: &[u64], words_per_row: usize, row: usize, col: usize) -> bool {
-    (cells[row * words_per_row + col / 64] >> (col % 64)) & 1 != 0
+    (cells[tiled_idx(row, col / 64, words_per_row)] >> (col % 64)) & 1 != 0
 }
 
 /// Sets or clears the bit at `(row, col)` in the bit-packed slice.
@@ -34,7 +69,7 @@ fn get_bit(cells: &[u64], words_per_row: usize, row: usize, col: usize) -> bool 
 /// * `alive`         — `true` to set the bit, `false` to clear it
 #[inline]
 fn set_bit(cells: &mut [u64], words_per_row: usize, row: usize, col: usize, alive: bool) {
-    let idx = row * words_per_row + col / 64;
+    let idx = tiled_idx(row, col / 64, words_per_row);
     let bit = col % 64;
     if alive {
         cells[idx] |= 1u64 << bit;
@@ -281,7 +316,7 @@ unsafe fn compute_4words(
     // Helper: read word at (r, w), returning 0 for out-of-bounds.
     let gw = |r: usize, w: usize| -> u64 {
         if r < height && w < wpr {
-            cells[r * wpr + w]
+            cells[tiled_idx(r, w, wpr)]
         } else {
             0
         }
@@ -394,40 +429,35 @@ fn compute_word(
     width: usize,
     height: usize,
 ) -> u64 {
+    let gw = |r: usize, w: usize| -> u64 {
+        if r < height && w < wpr {
+            cells[tiled_idx(r, w, wpr)]
+        } else {
+            0
+        }
+    };
     let ap = if row > 0 && wi > 0 {
-        cells[(row - 1) * wpr + wi - 1]
+        gw(row - 1, wi - 1)
     } else {
         0
     };
-    let a = if row > 0 {
-        cells[(row - 1) * wpr + wi]
-    } else {
-        0
-    };
+    let a = if row > 0 { gw(row - 1, wi) } else { 0 };
     let an = if row > 0 && wi + 1 < wpr {
-        cells[(row - 1) * wpr + wi + 1]
+        gw(row - 1, wi + 1)
     } else {
         0
     };
-    let cp = if wi > 0 { cells[row * wpr + wi - 1] } else { 0 };
-    let c = cells[row * wpr + wi];
-    let cn = if wi + 1 < wpr {
-        cells[row * wpr + wi + 1]
-    } else {
-        0
-    };
+    let cp = if wi > 0 { gw(row, wi - 1) } else { 0 };
+    let c = gw(row, wi);
+    let cn = if wi + 1 < wpr { gw(row, wi + 1) } else { 0 };
     let bp = if row + 1 < height && wi > 0 {
-        cells[(row + 1) * wpr + wi - 1]
+        gw(row + 1, wi - 1)
     } else {
         0
     };
-    let b = if row + 1 < height {
-        cells[(row + 1) * wpr + wi]
-    } else {
-        0
-    };
+    let b = if row + 1 < height { gw(row + 1, wi) } else { 0 };
     let bn = if row + 1 < height && wi + 1 < wpr {
-        cells[(row + 1) * wpr + wi + 1]
+        gw(row + 1, wi + 1)
     } else {
         0
     };
@@ -445,11 +475,18 @@ fn compute_word(
 /// A 2-D grid of cells for Conway's Game of Life with dead-cell boundaries.
 ///
 /// ## Storage layout
-/// Cells are stored in a flat bit-packed `Vec<u64>` in row-major order.
-/// Each row occupies `words_per_row = ⌈width / 64⌉` words.
-/// Within each word, bit `col % 64` corresponds to column `col`
-/// (LSB = leftmost column of the word group).  Unused high bits in the
-/// last word of each row are always zero.
+/// Cells are stored in a flat bit-packed `Vec<u64>` using a **tiled layout**
+/// (`TILE_HEIGHT = 8`) for cache locality.  Each row occupies
+/// `words_per_row = ⌈width / 64⌉` words.  Within each word, bit `col % 64`
+/// corresponds to column `col` (LSB = leftmost column of the word group).
+///
+/// In the tiled layout, eight consecutive row values for the same word-column
+/// are stored contiguously — forming a 64-byte cache line.  The flat index
+/// for word `(row, wi)` is `tiled_idx(row, wi, wpr)`.  The total buffer size
+/// is `tiled_size(height, wpr)`, which rounds `height` up to the next multiple
+/// of `TILE_HEIGHT`; extra padding slots beyond `height-1` are always zero.
+///
+/// Unused high bits in the last word of each row are always zero.
 ///
 /// ## Double-buffer
 /// A pre-allocated `next` scratch buffer avoids heap allocation per step.
@@ -526,7 +563,7 @@ impl Grid {
     /// * `height` — number of rows
     pub fn new(width: usize, height: usize) -> Self {
         let words_per_row = width.div_ceil(64);
-        let n = height * words_per_row;
+        let n = tiled_size(height, words_per_row);
         Self {
             width,
             height,
@@ -582,7 +619,7 @@ impl Grid {
     pub fn toggle(&mut self, row: usize, col: usize) {
         if row < self.height && col < self.width {
             let wpr = self.words_per_row;
-            let idx = row * wpr + col / 64;
+            let idx = tiled_idx(row, col / 64, wpr);
             let bit = col % 64;
             self.cells[idx] ^= 1u64 << bit;
             let new_alive = (self.cells[idx] >> bit) & 1 != 0;
@@ -657,7 +694,7 @@ impl Grid {
         // O(|prev_written|) with O(1) per contains(); prev_written need not be sorted.
         for &(row, wi) in &self.prev_written {
             if !self.frontier.contains(&(row, wi)) {
-                self.next[row * wpr + wi] = 0;
+                self.next[tiled_idx(row, wi, wpr)] = 0;
             }
         }
 
@@ -732,7 +769,7 @@ impl Grid {
         let mut new_live_bbox: Option<[usize; 4]> = None;
 
         for &(row, wi, new_word) in &self.results_buf {
-            self.next[row * wpr + wi] = new_word;
+            self.next[tiled_idx(row, wi, wpr)] = new_word;
             if new_word != 0 {
                 add_word_neighborhood(&mut self.next_frontier, row, wi, wpr, height);
             }
@@ -871,7 +908,7 @@ impl Grid {
         let new_w = self.width + add_left + add_right;
         let new_h = self.height + add_top + add_bottom;
         let new_wpr = new_w.div_ceil(64);
-        let n = new_h * new_wpr;
+        let n = tiled_size(new_h, new_wpr);
         let mut new_cells = vec![0u64; n];
 
         // Word-level copy: O(H × wpr) instead of O(H × W).
@@ -879,22 +916,26 @@ impl Grid {
         // row; overflow spills into the next word when `bit_shift > 0`.
         let bit_shift = add_left % 64;
         let word_shift = add_left / 64;
+        let old_wpr = self.words_per_row; // capture before update
         for row in 0..self.height {
-            let src_base = row * self.words_per_row;
-            let dst_base = (row + add_top) * new_wpr;
-            for wi in 0..self.words_per_row {
-                let src = self.cells[src_base + wi];
+            let src_prefix = (row / TILE_HEIGHT) * (old_wpr * TILE_HEIGHT) + (row % TILE_HEIGHT);
+            let dst_row = row + add_top;
+            let dst_prefix =
+                (dst_row / TILE_HEIGHT) * (new_wpr * TILE_HEIGHT) + (dst_row % TILE_HEIGHT);
+            for wi in 0..old_wpr {
+                let src = self.cells[src_prefix + wi * TILE_HEIGHT];
                 if src == 0 {
                     continue;
                 }
                 let dst_wi = wi + word_shift;
                 if bit_shift == 0 {
-                    new_cells[dst_base + dst_wi] |= src;
+                    new_cells[dst_prefix + dst_wi * TILE_HEIGHT] |= src;
                 } else {
                     // Handle separately to avoid `src >> 64` (undefined for u64).
-                    new_cells[dst_base + dst_wi] |= src << bit_shift;
+                    new_cells[dst_prefix + dst_wi * TILE_HEIGHT] |= src << bit_shift;
                     if dst_wi + 1 < new_wpr {
-                        new_cells[dst_base + dst_wi + 1] |= src >> (64 - bit_shift);
+                        new_cells[dst_prefix + (dst_wi + 1) * TILE_HEIGHT] |=
+                            src >> (64 - bit_shift);
                     }
                 }
             }
@@ -903,7 +944,7 @@ impl Grid {
         self.height = new_h;
         self.words_per_row = new_wpr;
         self.cells = new_cells;
-        self.next = vec![0u64; n]; // fresh zero buffer — no stale data
+        self.next = vec![0u64; tiled_size(new_h, new_wpr)]; // fresh zero buffer — no stale data
 
         fn shift(bbox: [usize; 4], dr: usize, dc: usize) -> [usize; 4] {
             [bbox[0] + dr, bbox[1] + dc, bbox[2] + dr, bbox[3] + dc]
@@ -1668,5 +1709,44 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Verifies `tiled_idx` and `tiled_size` produce the expected flat indices
+    /// for known (row, wi, wpr) inputs, ensuring the tile formula is correct.
+    #[test]
+    fn test_tiled_idx_formula() {
+        // tiled_idx(row, wi, wpr) = (row / 8) * (wpr * 8) + wi * 8 + (row % 8)
+        assert_eq!(
+            tiled_idx(0, 0, 2),
+            0,
+            "row 0, wi 0: first element of first tile"
+        );
+        assert_eq!(
+            tiled_idx(1, 0, 2),
+            1,
+            "row 1, wi 0: within same tile as row 0"
+        );
+        assert_eq!(
+            tiled_idx(8, 0, 2),
+            16,
+            "row 8, wi 0: first element of second tile"
+        );
+        assert_eq!(
+            tiled_idx(0, 1, 2),
+            8,
+            "row 0, wi 1: second word-column in same tile"
+        );
+
+        // tiled_size(height, wpr) = div_ceil(height, 8) * 8 * wpr
+        assert_eq!(
+            tiled_size(16, 2),
+            32,
+            "16 rows × wpr 2: exact multiple, 2 tiles = 32"
+        );
+        assert_eq!(
+            tiled_size(10, 2),
+            32,
+            "10 rows × wpr 2: padded up to 16 rows = 32"
+        );
     }
 }

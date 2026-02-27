@@ -69,7 +69,7 @@ handle_keyboard → handle_zoom → advance_simulation → draw_top_panel → dr
 
 ### Grid internals (`grid.rs`) — three interleaved optimisations
 
-1. **Bit-packed storage** — `Vec<u64>`, row-major, 64 cells per word (LSB = leftmost). `words_per_row = ⌈width/64⌉`. 8× memory reduction vs `Vec<bool>`.
+1. **Bit-packed tiled storage** — `Vec<u64>`, 64 cells per word (LSB = leftmost). `words_per_row = ⌈width/64⌉`. 8× memory reduction vs `Vec<bool>`. Stored in an **8-row tile layout** (`TILE_HEIGHT = 8`): `tiled_idx(row, wi, wpr) = (row/8)*(wpr*8) + wi*8 + (row%8)`. Eight consecutive row values for the same word-column share a 64-byte cache line, so `compute_word`'s vertical neighbour loads (row±1, wi) hit the same cache line as (row, wi). Buffer size is `tiled_size(height, wpr) = ⌈height/8⌉ × 8 × wpr`; padding slots beyond `height-1` are always zero.
 2. **Word-level frontier** — `frontier: FxHashSet<(row, wi)>` covers every word that contains a live cell or is adjacent to one. `step()` materialises it into `frontier_vec` and evaluates only those words — O(live + border) per step.
 3. **SWAR kernel** (`step_word`) — evaluates all 64 bit positions of a word simultaneously via carry-save adder trees (~30 bitwise ops) instead of 64 individual neighbour loops.  **AVX2 fast path** (`step_4words_avx2` / `compute_4words`) — processes four consecutive words in a single 256-bit pass using AVX2 lane-wise intrinsics (`_mm256_{slli,srli,or,and,xor,andnot}_si256`); dispatched from `step()` when `is_x86_feature_detected!("avx2")` is true and `frontier_vec.len() ≥ AVX2_SORT_THRESHOLD` (64).  Below that threshold the scalar `compute_word` path is used with no sorting overhead.
 
@@ -91,6 +91,7 @@ Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead r
 - `Simulation` has no egui dependency — keep simulation logic independently testable.
 - `drag_paint_state: Option<bool>` lives on `GameOfLifeApp` (not `Grid`): set on `drag_started`, cleared on `drag_stopped`.
 - Unused high bits in the last word of each row must always be zero (enforced by the mask in `step()` / `compute_4words()` and by `set_bit`).
+- Unused padding slots in the last partial tile (rows `height..⌈height/8⌉×8`) are always zero (allocated by `tiled_size` via `vec![0u64; n]`, never written by `set_bit`).
 - `live_bbox` is expanded conservatively (never shrunk except by `clear()` or `step()`).
 - `step_4words_avx2` is `unsafe` and `#[target_feature(enable = "avx2")]`; it must only be called inside an `is_x86_feature_detected!("avx2")` runtime guard — never unconditionally.
 
