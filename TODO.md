@@ -96,33 +96,19 @@ highest to lowest impact / easiest to hardest.
 
 ## 1. Performance — SWAR Engine
 
-**1.1 — Replace sort+dedup frontier with FxHashSet** ★ *Confirmed #1 by profiling*
-Sort accounts for **38%** of SWAR step time for large patterns. Replace the
-`Vec<(row, wi)>` + `sort_unstable` + `dedup` frontier with a
-`FxHashSet<(usize, usize)>`. Insertion is O(1) average; iteration is O(n).
-No sort needed. The overhead of hashing a `(usize, usize)` pair is negligible
-vs a quicksort of 14 000 elements.
-Expected gain: ~35–40% reduction in step time for large patterns.
-
-**1.2 — Reduce `add_word_neighborhood` cost** ★ *#2 hotspot at 18%*
-`add_word_neighborhood` pushes up to 9 words per live word into `next_frontier`,
-which causes `Vec::push` → `grow_amortized` to fire. With a `FxHashSet` frontier
-(TODO 1.1), insertion already becomes O(1) with no reallocation. If sticking
-with `Vec`, pre-size `next_frontier` to `frontier.len() * 9` before the loop.
-
-**1.3 — Parallelise frontier rebuild**
+**1.1 — Parallelise frontier rebuild**
 Only the `compute_word` phase is Rayon-parallelised; the subsequent frontier
 rebuild loop (`add_word_neighborhood` for each live result) is sequential.
 Collect new frontier entries in parallel (par_iter + flatten into a scratch
-buffer), then merge-sort and dedup as today, or insert into a concurrent set.
+buffer), then insert into the `FxHashSet` frontier or merge-dedup a Vec.
 
-**1.4 — AVX2 / SIMD kernel** *(lower priority — kernel already fast)*
+**1.2 — AVX2 / SIMD kernel** *(lower priority — kernel already fast)*
 Profiling shows `step_word` is fully inlined and absent from CPU samples —
-it is already not the bottleneck. Implement AVX2 only after items 1.1–1.3 are
-done. Replace scalar `step_word` with a 4×u64 AVX2 path under
+it is already not the bottleneck. Implement AVX2 only after item 1.1 is done.
+Replace scalar `step_word` with a 4×u64 AVX2 path under
 `#[cfg(target_feature = "avx2")]`.
 
-**1.5 — Tiled grid layout for cache locality**
+**1.3 — Tiled grid layout for cache locality**
 L1-dcache-load-misses: 995M for the large soup. A tiled layout (8-row × 1-word
 tiles) keeps a word and its row-neighbours in the same cache line. Lower
 priority than 1.1 given the already-acceptable 3.84% miss rate.
