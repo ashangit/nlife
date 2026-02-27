@@ -19,6 +19,11 @@ const DEFAULT_SPEED: f64 = 10.0;
 /// `Swar` uses the bit-packed SWAR (SIMD Within A Register) engine from
 /// [`Grid`]; `HashLife` uses the quadtree-memoised engine that can advance
 /// many generations at once for periodic or repetitive patterns.
+///
+/// The `Swar` variant is intentionally not boxed — `Grid`'s data is already
+/// entirely heap-allocated (Vecs and hash sets), so boxing the struct itself
+/// would only add a gratuitous pointer indirection.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum Engine {
     /// Bit-packed frontier-based SWAR engine.
     Swar(Grid),
