@@ -155,6 +155,222 @@ fn step_word(ap: u64, a: u64, an: u64, cp: u64, c: u64, cn: u64, bp: u64, b: u64
     !s6 & s5 & (s3 | c)
 }
 
+// ── AVX2 4-word kernel ────────────────────────────────────────────────────────
+
+/// AVX2 analogue of `step_word` that processes four 64-cell words simultaneously.
+///
+/// Each 64-bit lane of the nine `__m256i` inputs corresponds to one of four
+/// consecutive word positions (`wi`, `wi+1`, `wi+2`, `wi+3`).  The carry-save
+/// adder tree is identical to `step_word` but all operations use 256-bit
+/// lane-wise AVX2 intrinsics, giving 4× kernel throughput on AVX2 CPUs.
+///
+/// # Arguments
+/// * `ap`, `a`, `an`  — above-row neighbourhood (left, centre, right word)
+/// * `cp`, `c`, `cn`  — current-row neighbourhood
+/// * `bp`, `b`, `bn`  — below-row neighbourhood
+///
+/// Returns a `__m256i` whose four 64-bit lanes are the new alive words.
+///
+/// # Safety
+/// Caller must ensure the CPU supports AVX2 (use `is_x86_feature_detected!`).
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+#[allow(clippy::too_many_arguments)]
+unsafe fn step_4words_avx2(
+    ap: std::arch::x86_64::__m256i,
+    a: std::arch::x86_64::__m256i,
+    an: std::arch::x86_64::__m256i,
+    cp: std::arch::x86_64::__m256i,
+    c: std::arch::x86_64::__m256i,
+    cn: std::arch::x86_64::__m256i,
+    bp: std::arch::x86_64::__m256i,
+    b: std::arch::x86_64::__m256i,
+    bn: std::arch::x86_64::__m256i,
+) -> std::arch::x86_64::__m256i {
+    use std::arch::x86_64::*;
+    macro_rules! shl {
+        ($v:expr, $n:literal) => {
+            _mm256_slli_epi64($v, $n)
+        };
+    }
+    macro_rules! shr {
+        ($v:expr, $n:literal) => {
+            _mm256_srli_epi64($v, $n)
+        };
+    }
+    macro_rules! or {
+        ($a:expr, $b:expr) => {
+            _mm256_or_si256($a, $b)
+        };
+    }
+    macro_rules! and {
+        ($a:expr, $b:expr) => {
+            _mm256_and_si256($a, $b)
+        };
+    }
+    macro_rules! xor {
+        ($a:expr, $b:expr) => {
+            _mm256_xor_si256($a, $b)
+        };
+    }
+    macro_rules! andn {
+        ($a:expr, $b:expr) => {
+            _mm256_andnot_si256($a, $b)
+        };
+    } // (~a) & b
+
+    let n0 = or!(shl!(c, 1), shr!(cp, 63)); // left  (same row)
+    let n1 = or!(shr!(c, 1), shl!(cn, 63)); // right (same row)
+    let n2 = or!(shl!(a, 1), shr!(ap, 63)); // above-left
+    let n3 = a; // above
+    let n4 = or!(shr!(a, 1), shl!(an, 63)); // above-right
+    let n5 = or!(shl!(b, 1), shr!(bp, 63)); // below-left
+    let n6 = b; // below
+    let n7 = or!(shr!(b, 1), shl!(bn, 63)); // below-right
+
+    // CSA/HA tree (identical structure to scalar step_word)
+    let s0 = xor!(xor!(n0, n1), n2);
+    let c0 = or!(or!(and!(n0, n1), and!(n1, n2)), and!(n0, n2));
+    let s1 = xor!(xor!(n3, n4), n5);
+    let c1 = or!(or!(and!(n3, n4), and!(n4, n5)), and!(n3, n5));
+    let s2 = xor!(n6, n7);
+    let c2 = and!(n6, n7);
+
+    let s3 = xor!(xor!(s0, s1), s2);
+    let c3 = or!(or!(and!(s0, s1), and!(s1, s2)), and!(s0, s2));
+    let s4 = xor!(xor!(c0, c1), c2);
+    let c4 = or!(or!(and!(c0, c1), and!(c1, c2)), and!(c0, c2));
+
+    let s5 = xor!(s4, c3);
+    let c5 = and!(s4, c3);
+    let s6 = xor!(c5, c4);
+
+    // !s6 & s5 & (s3 | c)  →  andn(s6, and(s5, or(s3, c)))
+    and!(andn!(s6, s5), or!(s3, c))
+}
+
+/// Loads the 3×3 word neighbourhood for four consecutive words at
+/// `(row, wi..wi+3)` and runs `step_4words_avx2`, returning four new alive words.
+///
+/// Boundary conditions are handled identically to `compute_word`: any word
+/// outside the grid is treated as all-dead (zero).  Last-word masking
+/// (zeroing unused high bits) is applied to any of the four words that
+/// coincides with the final word in its row.
+///
+/// # Arguments
+/// * `cells`  — current-generation bit-packed buffer (read-only)
+/// * `row`, `wi` — coordinates of the first (leftmost) of the four words
+/// * `wpr`    — words per row
+/// * `width`  — grid width in columns
+/// * `height` — grid height in rows
+///
+/// # Safety
+/// Caller must ensure the CPU supports AVX2.
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+#[target_feature(enable = "avx2")]
+unsafe fn compute_4words(
+    cells: &[u64],
+    row: usize,
+    wi: usize,
+    wpr: usize,
+    width: usize,
+    height: usize,
+) -> [u64; 4] {
+    use std::arch::x86_64::*;
+
+    // Helper: read word at (r, w), returning 0 for out-of-bounds.
+    let gw = |r: usize, w: usize| -> u64 {
+        if r < height && w < wpr {
+            cells[r * wpr + w]
+        } else {
+            0
+        }
+    };
+
+    // For each of the three rows (above, current, below) load 6 consecutive
+    // words starting at wi-1 (saturating at 0) so we can assemble the three
+    // __m256i vectors (left-adjacent, centre, right-adjacent).
+    //
+    // lane 0 = word wi+0, lane 1 = word wi+1, lane 2 = word wi+2, lane 3 = wi+3
+    //   cp lane k = word wi+k-1 (the left neighbour of word wi+k)
+    //    c lane k = word wi+k
+    //   cn lane k = word wi+k+1
+
+    macro_rules! pack {
+        ($a:expr, $b:expr, $c_val:expr, $d:expr) => {
+            _mm256_set_epi64x($d as i64, $c_val as i64, $b as i64, $a as i64)
+        };
+    }
+
+    let (ra, rb) = (row.wrapping_sub(1), row + 1); // above / below row indices
+
+    // Above-row vectors
+    let ap = pack!(
+        gw(ra, wi.wrapping_sub(1)),
+        gw(ra, wi),
+        gw(ra, wi + 1),
+        gw(ra, wi + 2)
+    );
+    let a = pack!(gw(ra, wi), gw(ra, wi + 1), gw(ra, wi + 2), gw(ra, wi + 3));
+    let an = pack!(
+        gw(ra, wi + 1),
+        gw(ra, wi + 2),
+        gw(ra, wi + 3),
+        gw(ra, wi + 4)
+    );
+
+    // Current-row vectors
+    let cp = pack!(
+        gw(row, wi.wrapping_sub(1)),
+        gw(row, wi),
+        gw(row, wi + 1),
+        gw(row, wi + 2)
+    );
+    let c = pack!(
+        gw(row, wi),
+        gw(row, wi + 1),
+        gw(row, wi + 2),
+        gw(row, wi + 3)
+    );
+    let cn = pack!(
+        gw(row, wi + 1),
+        gw(row, wi + 2),
+        gw(row, wi + 3),
+        gw(row, wi + 4)
+    );
+
+    // Below-row vectors
+    let bp = pack!(
+        gw(rb, wi.wrapping_sub(1)),
+        gw(rb, wi),
+        gw(rb, wi + 1),
+        gw(rb, wi + 2)
+    );
+    let b = pack!(gw(rb, wi), gw(rb, wi + 1), gw(rb, wi + 2), gw(rb, wi + 3));
+    let bn = pack!(
+        gw(rb, wi + 1),
+        gw(rb, wi + 2),
+        gw(rb, wi + 3),
+        gw(rb, wi + 4)
+    );
+
+    let result = unsafe { step_4words_avx2(ap, a, an, cp, c, cn, bp, b, bn) };
+
+    let mut out = [0u64; 4];
+    unsafe { _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, result) };
+
+    // Apply last-word mask to any lane that is the final word of its row.
+    if !width.is_multiple_of(64) {
+        let mask = (1u64 << (width % 64)) - 1;
+        for (k, word) in out.iter_mut().enumerate() {
+            if wi + k + 1 == wpr {
+                *word &= mask;
+            }
+        }
+    }
+    out
+}
+
 // ── Per-word step helper ──────────────────────────────────────────────────────
 
 /// Reads the 3×3 word neighbourhood from `cells` and applies one step of
@@ -427,6 +643,16 @@ impl Grid {
         self.frontier_vec.clear();
         self.frontier_vec.extend(self.frontier.iter().copied());
 
+        // Sort when the frontier is large enough that the O(n log n) sort cost is justified:
+        // it enables AVX2 4-word batching (sequential path) and improves cache locality for
+        // word loads (Rayon parallel path).  Tiny frontiers (blinker: ~9 words, pulsar: ~45)
+        // skip the sort entirely — the overhead would exceed any benefit.
+        const AVX2_SORT_THRESHOLD: usize = 64;
+        let frontier_sorted = self.frontier_vec.len() >= AVX2_SORT_THRESHOLD;
+        if frontier_sorted {
+            self.frontier_vec.sort_unstable();
+        }
+
         // Zero words written last step that won't be overwritten this step.
         // O(|prev_written|) with O(1) per contains(); prev_written need not be sorted.
         for &(row, wi) in &self.prev_written {
@@ -451,11 +677,54 @@ impl Grid {
                     .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height))),
             );
         } else {
-            self.results_buf.extend(
-                self.frontier_vec
-                    .iter()
-                    .map(|&(row, wi)| (row, wi, compute_word(cells, row, wi, wpr, width, height))),
-            );
+            // Check AVX2 support once per step (not per word).
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            let has_avx2 = std::is_x86_feature_detected!("avx2");
+            #[cfg(not(any(target_arch = "x86", target_arch = "x86_64")))]
+            let has_avx2 = false;
+
+            if has_avx2 && frontier_sorted {
+                // AVX2 4-word batching: frontier is already sorted, so consecutive
+                // (row, wi)..(row, wi+3) runs are adjacent in the vec.
+                let n = self.frontier_vec.len();
+                let mut i = 0;
+                while i < n {
+                    let (row, wi) = self.frontier_vec[i];
+                    // Try 4-word AVX2 batch: need 4 consecutive words in the same row.
+                    if i + 3 < n
+                        && self.frontier_vec[i + 1] == (row, wi + 1)
+                        && self.frontier_vec[i + 2] == (row, wi + 2)
+                        && self.frontier_vec[i + 3] == (row, wi + 3)
+                        && wi + 4 <= wpr
+                    {
+                        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+                        {
+                            let words =
+                                unsafe { compute_4words(cells, row, wi, wpr, width, height) };
+                            for (k, &word) in words.iter().enumerate() {
+                                self.results_buf.push((row, wi + k, word));
+                            }
+                            i += 4;
+                            continue;
+                        }
+                    }
+                    self.results_buf.push((
+                        row,
+                        wi,
+                        compute_word(cells, row, wi, wpr, width, height),
+                    ));
+                    i += 1;
+                }
+            } else {
+                // Scalar fallback: tiny frontier or non-AVX2 CPU.  The iterator-based
+                // extend is well-optimised by the compiler and adds zero overhead vs the
+                // original implementation.
+                self.results_buf.extend(
+                    self.frontier_vec.iter().map(|&(row, wi)| {
+                        (row, wi, compute_word(cells, row, wi, wpr, width, height))
+                    }),
+                );
+            }
         }
 
         // Sequential apply: write results to self.next, build next_frontier and live_bbox.
@@ -1255,5 +1524,149 @@ mod tests {
             live_cells(&reference),
             "SWAR frontier-based and brute-force states diverged after 50 steps"
         );
+    }
+
+    /// Verifies that `step_4words_avx2` produces the same output as four independent
+    /// `step_word` calls for representative inputs: all-dead, blinker neighbourhood,
+    /// and dense/mixed patterns.
+    #[test]
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    fn test_avx2_matches_scalar() {
+        if !std::is_x86_feature_detected!("avx2") {
+            // Skip on machines without AVX2.
+            return;
+        }
+        use std::arch::x86_64::*;
+
+        // Helper: pack four u64 values into a __m256i (lane0=a, lane1=b, lane2=c, lane3=d).
+        let pack = |a: u64, b: u64, c: u64, d: u64| -> __m256i {
+            unsafe { _mm256_set_epi64x(d as i64, c as i64, b as i64, a as i64) }
+        };
+
+        // Helper: extract the four 64-bit lanes of a __m256i.
+        let unpack = |v: __m256i| -> [u64; 4] {
+            let mut out = [0u64; 4];
+            unsafe { _mm256_storeu_si256(out.as_mut_ptr() as *mut __m256i, v) };
+            out
+        };
+
+        // Test cases: each is a (ap, a, an, cp, c, cn, bp, b, bn) tuple of
+        // four u64 values per position. We run AVX2 and compare with 4× scalar.
+        struct Case {
+            name: &'static str,
+            // Nine arrays of four u64s: [ap0,ap1,ap2,ap3], [a0..], etc.
+            ap: [u64; 4],
+            a: [u64; 4],
+            an: [u64; 4],
+            cp: [u64; 4],
+            c: [u64; 4],
+            cn: [u64; 4],
+            bp: [u64; 4],
+            b: [u64; 4],
+            bn: [u64; 4],
+        }
+
+        let cases = [
+            Case {
+                name: "all_dead",
+                ap: [0; 4],
+                a: [0; 4],
+                an: [0; 4],
+                cp: [0; 4],
+                c: [0; 4],
+                cn: [0; 4],
+                bp: [0; 4],
+                b: [0; 4],
+                bn: [0; 4],
+            },
+            Case {
+                // Horizontal blinker: three consecutive bits in the centre word.
+                name: "blinker_neighbourhood",
+                ap: [0; 4],
+                a: [0; 4],
+                an: [0; 4],
+                cp: [0; 4],
+                c: [0b111, 0b111, 0b111, 0b111],
+                cn: [0; 4],
+                bp: [0; 4],
+                b: [0; 4],
+                bn: [0; 4],
+            },
+            Case {
+                // Dense: all ones in c, partial in neighbours.
+                name: "dense_centre",
+                ap: [0xAAAA_AAAA_AAAA_AAAA; 4],
+                a: [0xFFFF_FFFF_FFFF_FFFF; 4],
+                an: [0x5555_5555_5555_5555; 4],
+                cp: [0xFFFF_FFFF_FFFF_FFFF; 4],
+                c: [0xFFFF_FFFF_FFFF_FFFF; 4],
+                cn: [0xFFFF_FFFF_FFFF_FFFF; 4],
+                bp: [0xAAAA_AAAA_AAAA_AAAA; 4],
+                b: [0xFFFF_FFFF_FFFF_FFFF; 4],
+                bn: [0x5555_5555_5555_5555; 4],
+            },
+            Case {
+                // Mixed: varying values per lane to test lane independence.
+                name: "mixed_lanes",
+                ap: [
+                    0x0000_0000_0000_0001,
+                    0xDEAD_BEEF_0000_0000,
+                    0x0,
+                    0xFFFF_0000_FFFF_0000,
+                ],
+                a: [
+                    0x0000_0000_0000_0007,
+                    0x0000_0000_1234_5678,
+                    0x0,
+                    0x0000_FFFF_0000_FFFF,
+                ],
+                an: [
+                    0x0000_0000_0000_000E,
+                    0xCAFE_BABE_0000_0000,
+                    0x0,
+                    0xFFFF_FFFF_0000_0000,
+                ],
+                cp: [0x0, 0x0, 0x0, 0x0],
+                c: [
+                    0x0000_0000_0000_0007,
+                    0x0000_0000_0000_FFFF,
+                    0x0,
+                    0xAAAA_BBBB_CCCC_DDDD,
+                ],
+                cn: [0x0, 0x0, 0x0, 0x0],
+                bp: [0x0, 0x0, 0x0, 0x0],
+                b: [0x0000_0000_0000_0007, 0x0, 0x0, 0xAAAA_BBBB_CCCC_DDDD],
+                bn: [0x0, 0x0, 0x0, 0x0],
+            },
+        ];
+
+        for case in &cases {
+            let avx_result = unsafe {
+                let result = step_4words_avx2(
+                    pack(case.ap[0], case.ap[1], case.ap[2], case.ap[3]),
+                    pack(case.a[0], case.a[1], case.a[2], case.a[3]),
+                    pack(case.an[0], case.an[1], case.an[2], case.an[3]),
+                    pack(case.cp[0], case.cp[1], case.cp[2], case.cp[3]),
+                    pack(case.c[0], case.c[1], case.c[2], case.c[3]),
+                    pack(case.cn[0], case.cn[1], case.cn[2], case.cn[3]),
+                    pack(case.bp[0], case.bp[1], case.bp[2], case.bp[3]),
+                    pack(case.b[0], case.b[1], case.b[2], case.b[3]),
+                    pack(case.bn[0], case.bn[1], case.bn[2], case.bn[3]),
+                );
+                unpack(result)
+            };
+
+            for k in 0..4 {
+                let scalar = step_word(
+                    case.ap[k], case.a[k], case.an[k], case.cp[k], case.c[k], case.cn[k],
+                    case.bp[k], case.b[k], case.bn[k],
+                );
+                assert_eq!(
+                    avx_result[k], scalar,
+                    "AVX2 lane {k} mismatch for case '{}': got {:#018x}, expected {:#018x}",
+                    case.name, avx_result[k], scalar
+                );
+            }
+        }
     }
 }

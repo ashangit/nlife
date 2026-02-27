@@ -12,7 +12,7 @@ cargo test <name>     # run a single test, e.g. cargo test test_blinker_oscillat
 cargo clippy          # lint
 cargo fmt             # format
 cargo build --release # optimised build
-cargo bench --bench step   # microbenchmarks; run after any perf change to grid.rs
+cargo bench --bench step   # microbenchmarks; run before/after any performance change
 ```
 
 ## Workflow
@@ -25,10 +25,13 @@ cargo bench --bench step   # microbenchmarks; run after any perf change to grid.
   it and why (not just "updated X" — describe the actual change).
 - **Summarise changes**: after completing any modification, provide a summary listing every
   modified file and a brief description of what changed in each.
-- **Benchmark after perf changes**: after any change to a hot path in `grid.rs`, run
-  `cargo bench --bench step -- --save-baseline after` and compare it against a `before`
-  baseline captured at the prior commit.  A regression on any existing benchmark must be
-  justified or fixed before the commit is complete.
+- **Benchmark after perf changes**: for any change intended as a performance improvement,
+  capture a baseline *before* making changes with
+  `cargo bench --bench step -- --save-baseline before`, implement the change, then run
+  `cargo bench --bench step -- --save-baseline after` and compare with
+  `cargo bench --bench step -- --load-baseline before --baseline after`.
+  A regression on any existing benchmark must be justified or fixed before the commit is
+  complete.  This applies to any module, not just `grid.rs`.
 - **Unit tests are mandatory**: every source code change must include corresponding test
   updates — add new tests for new behaviour, update existing tests when behaviour changes,
   and delete tests that cover removed functionality.  A change without an appropriate test

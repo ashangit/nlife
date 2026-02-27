@@ -96,11 +96,6 @@ highest to lowest impact / easiest to hardest.
 
 ## 1. Performance — SWAR Engine
 
-**1.1 — AVX2 / SIMD kernel** *(lower priority — kernel already fast)*
-Profiling shows `step_word` is fully inlined and absent from CPU samples —
-it is already not the bottleneck. Replace scalar `step_word` with a 4×u64
-AVX2 path under `#[cfg(target_feature = "avx2")]`.
-
 **1.2 — Tiled grid layout for cache locality**
 L1-dcache-load-misses: 995M for the large soup. A tiled layout (8-row × 1-word
 tiles) keeps a word and its row-neighbours in the same cache line. Lower
