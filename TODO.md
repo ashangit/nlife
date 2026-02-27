@@ -96,22 +96,15 @@ highest to lowest impact / easiest to hardest.
 
 ## 1. Performance — SWAR Engine
 
-**1.1 — Parallelise frontier rebuild**
-Only the `compute_word` phase is Rayon-parallelised; the subsequent frontier
-rebuild loop (`add_word_neighborhood` for each live result) is sequential.
-Collect new frontier entries in parallel (par_iter + flatten into a scratch
-buffer), then insert into the `FxHashSet` frontier or merge-dedup a Vec.
-
-**1.2 — AVX2 / SIMD kernel** *(lower priority — kernel already fast)*
+**1.1 — AVX2 / SIMD kernel** *(lower priority — kernel already fast)*
 Profiling shows `step_word` is fully inlined and absent from CPU samples —
-it is already not the bottleneck. Implement AVX2 only after item 1.1 is done.
-Replace scalar `step_word` with a 4×u64 AVX2 path under
-`#[cfg(target_feature = "avx2")]`.
+it is already not the bottleneck. Replace scalar `step_word` with a 4×u64
+AVX2 path under `#[cfg(target_feature = "avx2")]`.
 
-**1.3 — Tiled grid layout for cache locality**
+**1.2 — Tiled grid layout for cache locality**
 L1-dcache-load-misses: 995M for the large soup. A tiled layout (8-row × 1-word
 tiles) keeps a word and its row-neighbours in the same cache line. Lower
-priority than 1.1 given the already-acceptable 3.84% miss rate.
+priority given the already-acceptable 3.84% miss rate.
 
 ---
 

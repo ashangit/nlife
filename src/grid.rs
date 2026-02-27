@@ -284,6 +284,24 @@ pub struct Grid {
     frontier_vec: Vec<(usize, usize)>,
 }
 
+/// Merges two bounding boxes into their union, handling `None` (empty) cases.
+///
+/// # Arguments
+/// * `a`, `b` — bounding boxes to merge, each `[row_min, col_min, row_max, col_max]`
+///
+/// Returns `None` only when both inputs are `None`.
+fn merge_bbox(a: Option<[usize; 4]>, b: Option<[usize; 4]>) -> Option<[usize; 4]> {
+    match (a, b) {
+        (None, x) | (x, None) => x,
+        (Some([rmin1, cmin1, rmax1, cmax1]), Some([rmin2, cmin2, rmax2, cmax2])) => Some([
+            rmin1.min(rmin2),
+            cmin1.min(cmin2),
+            rmax1.max(rmax2),
+            cmax1.max(cmax2),
+        ]),
+    }
+}
+
 impl Grid {
     /// Creates a new all-dead grid with the given dimensions.
     ///
@@ -446,24 +464,15 @@ impl Grid {
 
         for &(row, wi, new_word) in &self.results_buf {
             self.next[row * wpr + wi] = new_word;
-
-            // Build word-level next frontier: one neighbourhood push per non-zero word.
             if new_word != 0 {
                 add_word_neighborhood(&mut self.next_frontier, row, wi, wpr, height);
             }
-
-            // Extract alive bit positions for live_bbox only.
             let mut bits = new_word;
             while bits != 0 {
                 let b_pos = bits.trailing_zeros() as usize;
                 let col = wi * 64 + b_pos;
-                new_live_bbox = Some(match new_live_bbox {
-                    None => [row, col, row, col],
-                    Some([rmin, cmin, rmax, cmax]) => {
-                        [rmin.min(row), cmin.min(col), rmax.max(row), cmax.max(col)]
-                    }
-                });
-                bits &= bits - 1; // clear lowest set bit
+                new_live_bbox = merge_bbox(new_live_bbox, Some([row, col, row, col]));
+                bits &= bits - 1;
             }
         }
 
