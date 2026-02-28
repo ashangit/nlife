@@ -43,7 +43,7 @@ jobs:
         run: cargo build --release
 
       - name: Rename binary
-        run: cp target/release/newlife newlife-linux-${{ matrix.arch }}
+        run: cp target/release/nlife newlife-linux-${{ matrix.arch }}
 
       - name: Upload release asset
         uses: softprops/action-gh-release@v2
