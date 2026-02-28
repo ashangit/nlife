@@ -21,6 +21,8 @@ and rendered via wgpu on Wayland.
 - **Steps per frame** — batch 1–1024 simulation steps per visual frame for watching
   fast-evolving patterns
 - **Random fill** — 🎲 button fills the grid at a configurable density (1–100 %)
+- **Two simulation engines** — switch between the SWAR bit-packed engine and the
+  HashLife quadtree-memoised engine; both are exposed through the same `Simulation` API
 
 ### Grid
 - **Auto-expanding grid** — the canvas grows automatically (20-cell dead margin) whenever
@@ -37,14 +39,16 @@ and rendered via wgpu on Wayland.
 - **Live counter** — current live-cell count displayed in the top panel
 - **Sparkline** — rolling 128-sample population bar chart for spotting growth or extinction
 
-### Pattern library (25 built-in)
+### Pattern library (1 284 built-in)
 - **Browser panel** (left side) — filterable by category, searchable by name, each entry
   shows a 40×40 miniature preview
-- *Still lifes* (8): Block, Beehive, Loaf, Boat, Tub, Pond, Ship, Long Boat
-- *Oscillators* (7): Blinker, Toad, Beacon, Pulsar, Pentadecathlon, Figure Eight, Queen Bee Shuttle
-- *Guns* (1): Gosper Glider Gun
-- *Spaceships* (6): Glider, LWSS, MWSS, HWSS, Copperhead, Canada Goose
-- *Methuselahs* (3): R-Pentomino, Acorn, Diehard
+- *Still lifes* (366): Block, Beehive, Loaf, Boat, Tub, Pond, Ship, Long Boat, and many more
+- *Oscillators* (582): Blinker, Toad, Beacon, Pulsar, Pentadecathlon, Figure Eight, Queen Bee Shuttle, and many more
+- *Guns* (80): Gosper Glider Gun, 6-Engine Cordership Gun, and many more
+- *Spaceships* (179): Glider, LWSS, MWSS, HWSS, Copperhead, Canada Goose, Weekender, and many more
+- *Methuselahs* (50): R-Pentomino, Acorn, Diehard, and many more
+- *Puffers* (23): patterns that translate while leaving debris
+- *Wicks* (4): infinite fuse / wick patterns
 
 ### User patterns
 - **Save via browser** — "💾 Save…" popup writes a named `.cells` file to
@@ -60,7 +64,7 @@ and rendered via wgpu on Wayland.
 
 ## Prerequisites
 
-- **Rust toolchain** (edition 2021) — install via [rustup](https://rustup.rs)
+- **Rust toolchain** (edition 2024) — install via [rustup](https://rustup.rs)
 - **Wayland compositor** — required by the wgpu/winit backend
 - **`make`** — optional, for the convenience targets in `Makefile`
 
@@ -113,12 +117,12 @@ The codebase separates a pure simulation core (no UI dependency) from an egui fr
 |------|------|
 | `main.rs` | Entry point; creates the eframe window |
 | `app.rs` | `GameOfLifeApp` — top-level `eframe::App`; owns `Simulation`, `Camera`, browser state, user patterns |
-| `simulation.rs` | `Simulation` — pure state (no egui): grid, timing, speed, `steps_per_frame` |
-| `grid.rs` | `Grid` — core data structure; all perf-critical logic lives here |
+| `simulation.rs` | `Simulation` — pure state (no egui): grid, engine selection, timing, speed, `steps_per_frame` |
+| `grid.rs` | `Grid` — SWAR bit-packed engine; all perf-critical SWAR logic lives here |
+| `hashlife.rs` | `HashLife` — quadtree-memoised engine; canonical node interning, `step_recursive`, auto-expansion |
 | `camera.rs` | `Camera` — cell size (zoom), scroll offset, viewport rect |
 | `input.rs` | Keyboard shortcuts and Ctrl+scroll / pinch-to-zoom handling |
 | `build.rs` | Build script: scans `src/patterns/<category>/` and generates `$OUT_DIR/library_entries.rs` |
-| `patterns.rs` | `Pattern` enum with const `(Δrow, Δcol)` slices (used in tests) |
 | `library.rs` | Built-in pattern library: `Category`, `LibraryEntry`, `decoded_library()`; `LIBRARY` via generated `include!` |
 | `rle.rs` | RLE and `.cells` parser/serialiser: `parse_rle`, `parse_cells`, `write_cells`, `load_user_patterns` |
 | `ui/panel.rs` | Top control panel (play/pause, speed, generation counter, zoom, sparkline, file dialogs) |
@@ -140,50 +144,84 @@ handle_keyboard → handle_zoom → tick_zoom (smooth-zoom animation)
 accumulating the `(add_top, add_left)` expansion returned by `expand_if_needed` so
 `Camera::apply_expansion` can shift `scroll_offset` to keep the view stable.
 
-### Grid internals (`grid.rs`) — three interleaved optimisations
+### SWAR engine (`grid.rs`) — three interleaved optimisations
 
-#### 1 — Bit-packed storage
+#### 1 — Bit-packed tiled storage
 
-Cells are stored as `Vec<u64>`, row-major, 64 cells per word (LSB = leftmost cell).
+Cells are stored as `Vec<u64>`, 64 cells per word (LSB = leftmost cell), laid out in an
+**8-row tile** format for cache locality:
 
 ```
-words_per_row = ⌈width / 64⌉
+tiled_idx(row, wi, wpr) = (row/8)*(wpr*8) + wi*8 + (row%8)
 ```
 
-This gives an **8× memory reduction** over `Vec<bool>` and keeps neighbour data in
-cache-friendly 64-bit chunks.
+Eight consecutive row-slices for the same word-column share a 64-byte cache line, so
+vertical neighbour loads `(row±1, wi)` stay in the same cache line as `(row, wi)`.
+This gives an **8× memory reduction** over `Vec<bool>` and halves cache-miss pressure
+in the vertical direction.
 
 #### 2 — Word-level frontier
 
-`frontier: Vec<(row, word_index)>` lists every word that contains a live cell **or** is
-adjacent (horizontally, vertically, diagonally) to one.  `step()` visits only those words
-— **O(live + border)** per generation instead of O(width × height).
+`frontier: FxHashSet<(row, wi)>` covers every word that contains a live cell **or** is
+adjacent (horizontally, vertically, diagonally) to one.  `step()` materialises it into
+`frontier_vec` and visits only those words — **O(live + border)** per generation instead
+of O(width × height).
 
-The frontier is kept sorted and deduplicated lazily via a merge-scan.  `prev_written`
-tracks which scratch words need zeroing at the start of the next step (no hash-set
-overhead).
+`prev_written` tracks which scratch words need zeroing at the start of the next step
+(no hash-set overhead for the zeroing pass).
 
-#### 3 — SWAR kernel (`step_word`)
+#### 3 — SWAR kernel + AVX2 fast path
 
-Each frontier word is evaluated with a **carry-save adder tree** (~30 bitwise ops) that
-computes all 64 cell transitions simultaneously, avoiding 64 individual neighbour-count
-loops and keeping the hot path branch-free.
+**Scalar** (`step_word`): each frontier word is evaluated with a carry-save adder tree
+(~30 bitwise ops) that computes all 64 cell transitions simultaneously, avoiding 64
+individual neighbour-count loops.
+
+**AVX2** (`step_4words_avx2` / `compute_4words`): when AVX2 is available and the
+frontier is large enough (`≥ 64` words), `step()` sorts `frontier_vec` and processes
+four consecutive `(row, wi)` words per 256-bit pass using lane-wise AVX2 intrinsics
+(`_mm256_{slli,srli,or,and,xor,andnot}_si256`).  Sorting also improves cache locality
+for Rayon parallel evaluation.
 
 **Double-buffer**: `cells` (current state) and `next` (scratch) swap each step.
 
 **Auto-expand**: after every step, if any live cell touches an edge, `MARGIN = 20` dead
-rows/cols are prepended on that side and the scroll offset is compensated to keep the
-visible region stable.
+rows/cols are prepended on that side and the scroll offset is compensated.
+
+### HashLife engine (`hashlife.rs`) — quadtree memoisation
+
+`HashLife` stores the universe as a canonical quadtree.  Each node is identified by a
+`NodeId` (`u32` index into a flat arena).  The two leaf nodes `DEAD = 0` and `ALIVE = 1`
+occupy fixed slots.
+
+Key components:
+
+| Component | Description |
+|-----------|-------------|
+| `CanonTable` | Purpose-built open-addressing intern table; 20-byte `CanonEntry` structs, linear probing, 75 % load factor, FxHasher on two packed `u64` words |
+| `step_cache: FxHashMap<NodeId, NodeId>` | Memoised `step_recursive` results; valid across `expand_root` calls |
+| `step_recursive` | 9-submacrocell algorithm; advances level-k node by `2^(k−2)` generations, returning a level-(k−1) result |
+| `step_universe` | Public entry point; expands the root as needed (both `needs_expansion` and `needs_expansion_deep`), calls `step_recursive`, re-centres the result |
+
+**Expansion policy**: before each step two checks are performed:
+- `needs_expansion()` — all 12 outer grandchildren must be empty (cells inside `[N/4, 3N/4)`)
+- `needs_expansion_deep()` — all 12 near-boundary great-grandchildren must also be empty
+  (cells inside the inner quarter `[3N/8, 5N/8)`)
+
+The deeper check prevents cells that drift toward the result-window boundary from being
+silently dropped: after one `expand_root()` they land in the inner-most safe zone of the
+enlarged universe, guaranteeing they survive the step for patterns moving at up to `c/2`.
 
 ### Pattern library (`build.rs` + `library.rs` + `rle.rs` + `src/patterns/`)
 
 ```
 src/patterns/
-├── still_life/    *.rle   (8 patterns)
-├── oscillator/    *.rle   (7 patterns)
-├── gun/           *.rle   (1 pattern)
-├── spaceship/     *.rle   (6 patterns)
-└── methuselah/    *.rle   (3 patterns)
+├── still_life/    *.rle   (366 patterns)
+├── oscillator/    *.rle   (582 patterns)
+├── gun/           *.rle   (80 patterns)
+├── spaceship/     *.rle   (179 patterns)
+├── methuselah/    *.rle   (50 patterns)
+├── puffer/        *.rle   (23 patterns)
+└── wick/          *.rle   (4 patterns)
 ```
 
 - **Compile-time discovery** — `build.rs` scans these directories at build time, derives
@@ -203,7 +241,10 @@ src/patterns/
 | `Simulation` has no `egui` import | Keeps simulation logic independently unit-testable without a display |
 | `drag_paint_state: Option<bool>` lives on `GameOfLifeApp`, not `Grid` | Set on pointer-press, cleared on pointer-release; `Grid` remains input-stateless |
 | Unused high bits in the last word of each row are always zero | The SWAR kernel reads these bits; a stray `1` would create phantom live neighbours |
+| Unused padding slots in the last partial tile are always zero | Allocated via `vec![0u64; n]`, never written by `set_bit` |
 | `live_bbox` is only expanded, never shrunk (except by `clear()` / `step()`) | Conservative over-estimate of the frontier — never misses live cells |
+| `step_4words_avx2` is `unsafe` with `#[target_feature(enable = "avx2")]` | Must only be called inside an `is_x86_feature_detected!("avx2")` runtime guard |
+| `CANON_EMPTY = u32::MAX` is the CanonTable empty sentinel | `NodeId` `u32::MAX` is never a valid node index, so the sentinel is unambiguous |
 
 ---
 
