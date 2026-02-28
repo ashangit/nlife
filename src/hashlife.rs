@@ -7,10 +7,152 @@
 //! The step advances the universe by **2^(level−2)** generations per call —
 //! an exponential speed-up for repetitive/periodic patterns.
 
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHasher};
+use std::hash::Hasher;
 
 /// Index into the `HashLife::nodes` arena.  0 = DEAD leaf, 1 = ALIVE leaf.
 pub(crate) type NodeId = u32;
+
+// ── CanonTable ────────────────────────────────────────────────────────────────
+
+/// Sentinel value for an empty slot in [`CanonTable`].
+const CANON_EMPTY: u32 = u32::MAX;
+
+/// A single slot in the open-addressing intern table.
+///
+/// All five fields are packed contiguously (20 bytes), so sequential
+/// linear-probe steps stay within the same or adjacent cache lines.
+#[derive(Copy, Clone)]
+#[repr(C)]
+struct CanonEntry {
+    nw: u32,
+    ne: u32,
+    sw: u32,
+    se: u32,
+    /// `CANON_EMPTY` (u32::MAX) when the slot is vacant.
+    id: u32,
+}
+
+/// Purpose-built flat open-addressing hash table for node canonicalisation.
+///
+/// Key = `(nw, ne, sw, se)` → `NodeId`.  Load factor is kept ≤ 75 % before
+/// doubling.  Linear probing keeps all probe steps within contiguous memory.
+struct CanonTable {
+    entries: Vec<CanonEntry>,
+    /// `capacity - 1`; capacity is always a power of two.
+    mask: usize,
+    len: usize,
+}
+
+impl CanonTable {
+    /// Creates a new table with at least `cap` slots, rounded up to a power of 2.
+    fn with_capacity(cap: usize) -> Self {
+        let capacity = cap.next_power_of_two().max(8);
+        let empty = CanonEntry {
+            nw: 0,
+            ne: 0,
+            sw: 0,
+            se: 0,
+            id: CANON_EMPTY,
+        };
+        Self {
+            entries: vec![empty; capacity],
+            mask: capacity - 1,
+            len: 0,
+        }
+    }
+
+    /// Computes the slot index for `(nw, ne, sw, se)`.
+    #[inline]
+    fn hash_slot(&self, nw: u32, ne: u32, sw: u32, se: u32) -> usize {
+        let mut h = FxHasher::default();
+        h.write_u64((nw as u64) | ((ne as u64) << 32));
+        h.write_u64((sw as u64) | ((se as u64) << 32));
+        (h.finish() as usize) & self.mask
+    }
+
+    /// Looks up `(nw, ne, sw, se)` and returns the interned `NodeId`, or
+    /// `None` if not present.
+    #[inline]
+    fn get(&self, nw: u32, ne: u32, sw: u32, se: u32) -> Option<u32> {
+        let mut slot = self.hash_slot(nw, ne, sw, se);
+        loop {
+            let e = self.entries[slot];
+            if e.id == CANON_EMPTY {
+                return None;
+            }
+            if e.nw == nw && e.ne == ne && e.sw == sw && e.se == se {
+                return Some(e.id);
+            }
+            slot = (slot + 1) & self.mask;
+        }
+    }
+
+    /// Inserts `(nw, ne, sw, se) → id`.
+    ///
+    /// Resizes (double capacity + rehash) when the load factor exceeds 75 %.
+    /// The caller guarantees the key is not already present.
+    fn insert(&mut self, nw: u32, ne: u32, sw: u32, se: u32, id: u32) {
+        // Grow before insertion so the probe always terminates.
+        if self.len * 4 >= self.entries.len() * 3 {
+            self.grow();
+        }
+        let mut slot = self.hash_slot(nw, ne, sw, se);
+        loop {
+            if self.entries[slot].id == CANON_EMPTY {
+                self.entries[slot] = CanonEntry { nw, ne, sw, se, id };
+                self.len += 1;
+                return;
+            }
+            slot = (slot + 1) & self.mask;
+        }
+    }
+
+    /// Clears all entries by refilling with the empty sentinel.
+    fn clear(&mut self) {
+        let empty = CanonEntry {
+            nw: 0,
+            ne: 0,
+            sw: 0,
+            se: 0,
+            id: CANON_EMPTY,
+        };
+        self.entries.fill(empty);
+        self.len = 0;
+    }
+
+    /// Doubles capacity and rehashes all live entries.
+    fn grow(&mut self) {
+        let new_cap = (self.entries.len() * 2).max(8);
+        let new_mask = new_cap - 1;
+        let empty = CanonEntry {
+            nw: 0,
+            ne: 0,
+            sw: 0,
+            se: 0,
+            id: CANON_EMPTY,
+        };
+        let mut new_entries = vec![empty; new_cap];
+        for e in &self.entries {
+            if e.id == CANON_EMPTY {
+                continue;
+            }
+            let mut h = FxHasher::default();
+            h.write_u64((e.nw as u64) | ((e.ne as u64) << 32));
+            h.write_u64((e.sw as u64) | ((e.se as u64) << 32));
+            let mut slot = (h.finish() as usize) & new_mask;
+            loop {
+                if new_entries[slot].id == CANON_EMPTY {
+                    new_entries[slot] = *e;
+                    break;
+                }
+                slot = (slot + 1) & new_mask;
+            }
+        }
+        self.entries = new_entries;
+        self.mask = new_mask;
+    }
+}
 
 /// Level-0 dead leaf (always slot 0).
 const DEAD: NodeId = 0;
@@ -66,7 +208,7 @@ pub(crate) struct HashLife {
     /// Arena of all interned nodes; `nodes[0]` = DEAD, `nodes[1]` = ALIVE.
     nodes: Vec<Node>,
     /// Canonicalisation map: `(nw, ne, sw, se)` → `NodeId`.
-    canon: FxHashMap<(NodeId, NodeId, NodeId, NodeId), NodeId>,
+    canon: CanonTable,
     /// Memoisation cache for `step_recursive`.
     step_cache: FxHashMap<NodeId, NodeId>,
     /// Current root node.
@@ -98,7 +240,7 @@ impl HashLife {
         };
         let mut hl = HashLife {
             nodes: vec![dead_leaf, alive_leaf],
-            canon: FxHashMap::default(),
+            canon: CanonTable::with_capacity(4096),
             step_cache: FxHashMap::default(),
             root: 0,
             level: 0,
@@ -359,8 +501,7 @@ impl HashLife {
     /// `NodeId`; otherwise creates a new node, computes `pop = sum(children)`,
     /// and inserts into the arena and canon map.
     fn make_node(&mut self, nw: NodeId, ne: NodeId, sw: NodeId, se: NodeId) -> NodeId {
-        let key = (nw, ne, sw, se);
-        if let Some(&id) = self.canon.get(&key) {
+        if let Some(id) = self.canon.get(nw, ne, sw, se) {
             return id;
         }
         let level = self.nodes[nw as usize].level + 1;
@@ -377,7 +518,7 @@ impl HashLife {
             se,
             pop,
         });
-        self.canon.insert(key, id);
+        self.canon.insert(nw, ne, sw, se, id);
         id
     }
 
