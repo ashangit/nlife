@@ -47,12 +47,12 @@ cargo bench --bench step   # microbenchmarks; run before/after any performance c
 |---|---|
 | `main.rs` | Entry point; creates the eframe window |
 | `app.rs` | `GameOfLifeApp` — top-level `eframe::App`; owns `Simulation`, `Camera`, browser state, user patterns |
-| `simulation.rs` | `Simulation` — pure state (no egui): grid, timing, speed, `steps_per_frame` |
-| `grid.rs` | `Grid` — core data structure; all perf-critical logic lives here |
+| `simulation.rs` | `Simulation` — pure state (no egui): engine selection, timing, speed, `steps_per_frame` |
+| `grid.rs` | `Grid` — SWAR bit-packed engine; all perf-critical SWAR logic lives here |
+| `hashlife.rs` | `HashLife` — quadtree-memoised engine; canonical node interning, `step_recursive`, auto-expansion |
 | `camera.rs` | `Camera` — cell size (zoom), scroll offset, viewport rect |
 | `input.rs` | Keyboard shortcuts and Ctrl+scroll / pinch-to-zoom |
 | `build.rs` | Build script: scans `src/patterns/<category>/` and generates `$OUT_DIR/library_entries.rs` |
-| `patterns.rs` | `Pattern` enum with const `(Δrow, Δcol)` slices (used in tests) |
 | `library.rs` | Built-in pattern library: `Category`, `LibraryEntry`, `decoded_library()`; `LIBRARY` via generated `include!` |
 | `rle.rs` | RLE and `.cells` parser/serialiser: `parse_rle`, `parse_cells`, `write_cells`, `load_user_patterns` |
 | `ui/panel.rs` | Top control panel (play/pause, speed, generation counter, zoom) |
@@ -77,11 +77,21 @@ Double-buffer: `cells` (current) and `next` (scratch) swap each step. `prev_writ
 
 Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead rows/cols are prepended on that side and the scroll offset is shifted to keep the view stable.
 
+### HashLife engine (`hashlife.rs`)
+
+- `HashLife` stores the universe as a canonical quadtree; nodes are identified by `NodeId` (`u32` arena index)
+- `CanonTable` — purpose-built open-addressing intern map; 20-byte `CanonEntry {nw,ne,sw,se,id}`, linear probing, 75% load factor, FxHasher on two packed `u64` words; replaces `FxHashMap<(u32,u32,u32,u32),u32>` for better cache locality
+- `step_recursive` — 9-submacrocell algorithm advancing `2^(level−2)` gens, memoised in `step_cache: FxHashMap<NodeId,NodeId>`
+- `step_universe` expansion loop checks **two conditions** before each step:
+  1. `needs_expansion()` — all 12 outer grandchildren must be empty (cells within `[N/4, 3N/4)`)
+  2. `needs_expansion_deep()` — all 12 near-boundary great-grandchildren must also be empty (cells within `[3N/8, 5N/8)`); prevents cells near the result-window boundary from being silently dropped during the step for patterns moving at up to c/2
+- Re-centering after each step: result `(level k−1)` is split into 4 quadrants and assembled into a same-level root with dead padding, preserving absolute cell coordinates
+
 ### Pattern library (`build.rs` + `library.rs` + `rle.rs` + `src/patterns/`)
 
-- `src/patterns/<category>/*.rle` — 25 RLE files in 5 subfolders (`still_life/`, `oscillator/`, `gun/`, `spaceship/`, `methuselah/`)
+- `src/patterns/<category>/*.rle` — 1284 RLE files in 7 subfolders (`still_life/`×366, `oscillator/`×582, `gun/`×80, `spaceship/`×179, `methuselah/`×50, `puffer/`×23, `wick/`×4)
 - `build.rs` scans these dirs at compile time, derives each pattern's name from the file stem, and writes `$OUT_DIR/library_entries.rs`; adding a pattern = dropping a `.rle` file in the right folder
-- `LIBRARY: &[LibraryEntry]` — 25 entries loaded via `include!(concat!(env!("OUT_DIR"), "/library_entries.rs"))`
+- `LIBRARY: &[LibraryEntry]` — all entries loaded via `include!(concat!(env!("OUT_DIR"), "/library_entries.rs"))`
 - `decoded_library()` — decodes all entries once via `OnceLock`, centres each with `center_cells`
 - User patterns stored in `~/.config/newlife/patterns/*.cells`; loaded at startup and after saves via `load_user_patterns`
 - `Category::Custom` distinguishes user patterns from built-ins in the browser
@@ -94,6 +104,8 @@ Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead r
 - Unused padding slots in the last partial tile (rows `height..⌈height/8⌉×8`) are always zero (allocated by `tiled_size` via `vec![0u64; n]`, never written by `set_bit`).
 - `live_bbox` is expanded conservatively (never shrunk except by `clear()` or `step()`).
 - `step_4words_avx2` is `unsafe` and `#[target_feature(enable = "avx2")]`; it must only be called inside an `is_x86_feature_detected!("avx2")` runtime guard — never unconditionally.
+- `CANON_EMPTY = u32::MAX` is the `CanonTable` empty-slot sentinel; `NodeId` `u32::MAX` is never a valid node index.
+- `needs_expansion_deep()` must be checked alongside `needs_expansion()` in `step_universe`'s expansion loop; omitting it allows cells near the result-window boundary to be silently dropped for expanding patterns (e.g. cordership guns).
 
 ## Documentation
 
