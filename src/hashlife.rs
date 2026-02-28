@@ -9,6 +9,7 @@
 
 use rustc_hash::{FxHashMap, FxHasher};
 use std::hash::Hasher;
+use std::sync::OnceLock;
 
 /// Index into the `HashLife::nodes` arena.  0 = DEAD leaf, 1 = ALIVE leaf.
 pub(crate) type NodeId = u32;
@@ -165,6 +166,42 @@ const DEFAULT_LEVEL: u8 = 8;
 const MIN_STEP_LEVEL: u8 = 4;
 /// Dead-cell margin (rows/cols) added around a loaded pattern.
 const LOAD_MARGIN: usize = 40;
+
+// ── Level-2 lookup table ──────────────────────────────────────────────────────
+
+/// Precomputed 4×4 → 2×2 GoL step table.
+///
+/// Index: 16 cells of a level-2 node packed into a `u16` (row-major, bit
+/// `r*4+c`). Value: 4-bit result (bit0 = r_nw, bit1 = r_ne, bit2 = r_sw,
+/// bit3 = r_se) after applying one generation of Conway's rules to the four
+/// centre cells (rows/cols 1–2 of the 4×4 grid).
+static STEP_LEVEL2_TABLE: OnceLock<Box<[u8; 65536]>> = OnceLock::new();
+
+fn build_step_level2_table() -> Box<[u8; 65536]> {
+    let mut table = Box::new([0u8; 65536]);
+    for idx in 0u32..65536 {
+        let cell = |r: usize, c: usize| -> bool { (idx >> (r * 4 + c)) & 1 != 0 };
+        let gol = |r: usize, c: usize| -> u8 {
+            let alive = cell(r, c);
+            let mut nbrs = 0u32;
+            for dr in [-1i32, 0, 1] {
+                for dc in [-1i32, 0, 1] {
+                    if dr == 0 && dc == 0 {
+                        continue;
+                    }
+                    let nr = r as i32 + dr;
+                    let nc = c as i32 + dc;
+                    if (0..4).contains(&nr) && (0..4).contains(&nc) {
+                        nbrs += cell(nr as usize, nc as usize) as u32;
+                    }
+                }
+            }
+            (nbrs == 3 || (alive && nbrs == 2)) as u8
+        };
+        table[idx as usize] = gol(1, 1) | (gol(1, 2) << 1) | (gol(2, 1) << 2) | (gol(2, 2) << 3);
+    }
+    table
+}
 
 // ── Node ─────────────────────────────────────────────────────────────────────
 
@@ -677,68 +714,48 @@ impl HashLife {
         self.make_node(nw_se, ne_sw, sw_ne, se_nw)
     }
 
-    /// Brute-force 4×4 → 2×2 step for level-2 nodes.
+    /// 4×4 → 2×2 step for level-2 nodes via a precomputed lookup table.
     ///
-    /// Extracts the 16 cells from the four level-1 children, applies one
-    /// generation of Conway's rules to the 4 centre cells, and returns the
-    /// canonical level-1 result node.
+    /// The 16 cells of the 4×4 node are packed into a `u16` index (row-major,
+    /// bit `r*4+c`), looked up in [`STEP_LEVEL2_TABLE`], and the 4-bit result
+    /// maps to the four canonical level-1 child `NodeId`s.
     fn step_level2(&mut self, node: NodeId) -> NodeId {
+        let table = STEP_LEVEL2_TABLE.get_or_init(build_step_level2_table);
+
         let n = self.nodes[node as usize];
         let nw = self.nodes[n.nw as usize];
         let ne = self.nodes[n.ne as usize];
         let sw = self.nodes[n.sw as usize];
         let se = self.nodes[n.se as usize];
 
-        // 4×4 grid; `true` = alive.
-        let cells: [[bool; 4]; 4] = [
-            [
-                nw.nw == ALIVE,
-                nw.ne == ALIVE,
-                ne.nw == ALIVE,
-                ne.ne == ALIVE,
-            ],
-            [
-                nw.sw == ALIVE,
-                nw.se == ALIVE,
-                ne.sw == ALIVE,
-                ne.se == ALIVE,
-            ],
-            [
-                sw.nw == ALIVE,
-                sw.ne == ALIVE,
-                se.nw == ALIVE,
-                se.ne == ALIVE,
-            ],
-            [
-                sw.sw == ALIVE,
-                sw.se == ALIVE,
-                se.sw == ALIVE,
-                se.se == ALIVE,
-            ],
-        ];
+        // Pack 16 cells into a u16 index (row-major, bit r*4+c):
+        //   Row 0: nw.nw nw.ne ne.nw ne.ne  → bits  0– 3
+        //   Row 1: nw.sw nw.se ne.sw ne.se  → bits  4– 7
+        //   Row 2: sw.nw sw.ne se.nw se.ne  → bits  8–11
+        //   Row 3: sw.sw sw.se se.sw se.se  → bits 12–15
+        let idx = ((nw.nw == ALIVE) as u16)
+            | ((nw.ne == ALIVE) as u16) << 1
+            | ((ne.nw == ALIVE) as u16) << 2
+            | ((ne.ne == ALIVE) as u16) << 3
+            | ((nw.sw == ALIVE) as u16) << 4
+            | ((nw.se == ALIVE) as u16) << 5
+            | ((ne.sw == ALIVE) as u16) << 6
+            | ((ne.se == ALIVE) as u16) << 7
+            | ((sw.nw == ALIVE) as u16) << 8
+            | ((sw.ne == ALIVE) as u16) << 9
+            | ((se.nw == ALIVE) as u16) << 10
+            | ((se.ne == ALIVE) as u16) << 11
+            | ((sw.sw == ALIVE) as u16) << 12
+            | ((sw.se == ALIVE) as u16) << 13
+            | ((se.sw == ALIVE) as u16) << 14
+            | ((se.se == ALIVE) as u16) << 15;
 
-        let gol = |r: usize, c: usize| -> bool {
-            let alive = cells[r][c];
-            let mut nbrs = 0u32;
-            for dr in [-1i32, 0, 1] {
-                for dc in [-1i32, 0, 1] {
-                    if dr == 0 && dc == 0 {
-                        continue;
-                    }
-                    let nr = r as i32 + dr;
-                    let nc = c as i32 + dc;
-                    if (0..4).contains(&nr) && (0..4).contains(&nc) {
-                        nbrs += cells[nr as usize][nc as usize] as u32;
-                    }
-                }
-            }
-            nbrs == 3 || (alive && nbrs == 2)
-        };
-
-        let r_nw = if gol(1, 1) { ALIVE } else { DEAD };
-        let r_ne = if gol(1, 2) { ALIVE } else { DEAD };
-        let r_sw = if gol(2, 1) { ALIVE } else { DEAD };
-        let r_se = if gol(2, 2) { ALIVE } else { DEAD };
+        // 4-bit result: bit0=r_nw, bit1=r_ne, bit2=r_sw, bit3=r_se
+        let result = table[idx as usize];
+        let r_nw = if result & 1 != 0 { ALIVE } else { DEAD };
+        let r_ne = if result & 2 != 0 { ALIVE } else { DEAD };
+        let r_sw = if result & 4 != 0 { ALIVE } else { DEAD };
+        let r_se = if result & 8 != 0 { ALIVE } else { DEAD };
 
         self.make_node(r_nw, r_ne, r_sw, r_se)
     }
