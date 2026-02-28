@@ -1,4 +1,4 @@
-# newlife
+# nlife
 
 A Conway's Game of Life desktop app written in Rust, built with
 [egui](https://github.com/emilk/egui) /

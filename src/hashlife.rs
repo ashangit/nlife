@@ -166,6 +166,8 @@ const DEFAULT_LEVEL: u8 = 8;
 const MIN_STEP_LEVEL: u8 = 4;
 /// Dead-cell margin (rows/cols) added around a loaded pattern.
 const LOAD_MARGIN: usize = 40;
+/// Trigger GC when the arena exceeds this many nodes (≈ 28 MB at 28 B/node).
+const GC_THRESHOLD: usize = 1 << 20; // 1 048 576
 
 // ── Level-2 lookup table ──────────────────────────────────────────────────────
 
@@ -497,6 +499,10 @@ impl HashLife {
     /// `expansion_per_side` is the number of cells added to each of the four
     /// sides due to `expand_root` calls (used for camera scroll compensation).
     pub(crate) fn step_universe(&mut self) -> (u64, usize) {
+        if self.nodes.len() > GC_THRESHOLD {
+            self.gc();
+        }
+
         let mut expansion: usize = 0;
 
         // Ensure at least MIN_STEP_LEVEL, that outer quadrants are empty, and
@@ -819,6 +825,103 @@ impl HashLife {
 
         self.step_cache.insert(node, result);
         result
+    }
+
+    // ── Garbage collection ────────────────────────────────────────────────────
+
+    /// Collects unreachable nodes from the arena, compacting it.
+    ///
+    /// Performs a mark-sweep-compact cycle:
+    ///
+    /// 1. **Mark** — BFS from `self.root`; `DEAD` and `ALIVE` are always live.
+    /// 2. **Remap** — assign consecutive new IDs to reachable nodes.
+    /// 3. **Compact** — build a new `nodes` vec with only reachable entries;
+    ///    rewrite child pointers of non-leaf nodes through `remap`.
+    /// 4. **Rebuild canon** — clear and re-insert every reachable non-leaf node
+    ///    using the already-remapped child IDs.
+    /// 5. **Remap step_cache** — keep only entries where both the source node
+    ///    and the result node survived; translate IDs through `remap`.
+    /// 6. **Commit** — update `self.root`, replace `self.nodes`.
+    fn gc(&mut self) {
+        let n = self.nodes.len();
+
+        // 1. Mark phase: BFS from root.
+        let mut reachable = vec![false; n];
+        reachable[DEAD as usize] = true;
+        reachable[ALIVE as usize] = true;
+        let mut stack: Vec<NodeId> = Vec::new();
+        if !reachable[self.root as usize] {
+            stack.push(self.root);
+        }
+        while let Some(id) = stack.pop() {
+            if reachable[id as usize] {
+                continue;
+            }
+            reachable[id as usize] = true;
+            let node = self.nodes[id as usize];
+            if node.level > 0 {
+                for child in [node.nw, node.ne, node.sw, node.se] {
+                    if !reachable[child as usize] {
+                        stack.push(child);
+                    }
+                }
+            }
+        }
+
+        // 2. Build remap: old NodeId → new NodeId (u32::MAX = unreachable).
+        let mut remap = vec![u32::MAX; n];
+        let mut next_id = 0u32;
+        for (old_id, &is_reachable) in reachable.iter().enumerate() {
+            if is_reachable {
+                remap[old_id] = next_id;
+                next_id += 1;
+            }
+        }
+
+        // 3. Compact nodes: copy only reachable entries, then rewrite children.
+        let mut new_nodes: Vec<Node> = Vec::with_capacity(next_id as usize);
+        for (&is_reachable, node) in reachable.iter().zip(self.nodes.iter()) {
+            if is_reachable {
+                new_nodes.push(*node);
+            }
+        }
+        for node in &mut new_nodes {
+            if node.level > 0 {
+                node.nw = remap[node.nw as usize];
+                node.ne = remap[node.ne as usize];
+                node.sw = remap[node.sw as usize];
+                node.se = remap[node.se as usize];
+            }
+        }
+
+        // 4. Rebuild canon from the compacted, remapped nodes.
+        self.canon.clear();
+        for (new_id, node) in new_nodes.iter().enumerate() {
+            if node.level > 0 {
+                self.canon
+                    .insert(node.nw, node.ne, node.sw, node.se, new_id as u32);
+            }
+        }
+
+        // 5. Remap step_cache: keep entries where both source and result survived.
+        let old_cache = std::mem::take(&mut self.step_cache);
+        self.step_cache = old_cache
+            .into_iter()
+            .filter_map(|(old_k, old_v)| {
+                let new_k = remap[old_k as usize];
+                let new_v = remap[old_v as usize];
+                if new_k == u32::MAX || new_v == u32::MAX {
+                    None
+                } else {
+                    Some((new_k, new_v))
+                }
+            })
+            .collect();
+
+        // 6. Commit.
+        self.root = remap[self.root as usize];
+        self.nodes = new_nodes;
+        self.nodes.shrink_to_fit();
     }
 
     // ── Cell access helpers ───────────────────────────────────────────────────
@@ -1273,6 +1376,109 @@ mod tests {
             "cell in nw.se.se (inner great-grandchild) must NOT trigger needs_expansion_deep"
         );
         let _ = eighth;
+    }
+
+    // ── Garbage collection tests ──────────────────────────────────────────────
+
+    /// After GC, population and subsequent evolution are unchanged.
+    #[test]
+    fn test_gc_preserves_state() {
+        let mut hl = HashLife::new();
+        // Standard SE glider (period 4, speed c/4 diagonal).
+        hl.set_cells(&[(0, 1), (1, 2), (2, 0), (2, 1), (2, 2)]);
+        assert_eq!(hl.population(), 5);
+
+        // Advance at least 256 generations to build up arena nodes.
+        // Cap by total gens (not call count) to avoid u64 overflow when the
+        // level grows and step_size becomes very large.
+        let mut total = 0u64;
+        while total < 256 {
+            let (g, _) = hl.step_universe();
+            total += g;
+        }
+        assert_eq!(
+            hl.population(),
+            5,
+            "glider population must stay 5 before GC"
+        );
+
+        // GC must not change observable state.
+        hl.gc();
+        assert_eq!(hl.population(), 5, "GC must preserve population");
+
+        // Engine must still produce correct results after GC.
+        while total < 512 {
+            let (g, _) = hl.step_universe();
+            total += g;
+        }
+        assert_eq!(
+            hl.population(),
+            5,
+            "glider population must stay 5 after post-GC steps"
+        );
+    }
+
+    /// GC must reduce the arena after many steps have accumulated stale nodes.
+    #[test]
+    fn test_gc_reclaims_nodes() {
+        let mut hl = HashLife::new();
+        // Gosper glider gun (period 30, emits one glider every 30 gens).
+        let gosper: &[(i32, i32)] = &[
+            (0, 24),
+            (1, 22),
+            (1, 24),
+            (2, 12),
+            (2, 13),
+            (2, 20),
+            (2, 21),
+            (2, 34),
+            (2, 35),
+            (3, 11),
+            (3, 15),
+            (3, 20),
+            (3, 21),
+            (3, 34),
+            (3, 35),
+            (4, 0),
+            (4, 1),
+            (4, 10),
+            (4, 16),
+            (4, 20),
+            (4, 21),
+            (5, 0),
+            (5, 1),
+            (5, 10),
+            (5, 14),
+            (5, 16),
+            (5, 17),
+            (5, 22),
+            (5, 24),
+            (6, 10),
+            (6, 16),
+            (6, 24),
+            (7, 11),
+            (7, 15),
+            (8, 12),
+            (8, 13),
+        ];
+        hl.set_cells(gosper);
+
+        // Run until at least 2000 generations to fill the arena with stale
+        // intermediate nodes.  Cap by total gens to avoid overflow.
+        let mut total = 0u64;
+        while total < 2000 {
+            let (g, _) = hl.step_universe();
+            total += g;
+        }
+        let before = hl.nodes.len();
+
+        // GC must reclaim unreachable nodes.
+        hl.gc();
+        assert!(
+            hl.nodes.len() < before,
+            "GC must reclaim nodes: before={before}, after={}",
+            hl.nodes.len()
+        );
     }
 
     /// A single glider (c/4 diagonal spaceship) run long enough to trigger
