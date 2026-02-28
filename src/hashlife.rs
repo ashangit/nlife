@@ -462,8 +462,11 @@ impl HashLife {
     pub(crate) fn step_universe(&mut self) -> (u64, usize) {
         let mut expansion: usize = 0;
 
-        // Ensure at least MIN_STEP_LEVEL and that outer quadrants are empty.
-        while self.level < MIN_STEP_LEVEL || self.needs_expansion() {
+        // Ensure at least MIN_STEP_LEVEL, that outer quadrants are empty, and
+        // that live cells are not in the near-boundary band of the safe zone.
+        // The deeper check (`needs_expansion_deep`) prevents cells from drifting
+        // out of the step-result window during a step; see its doc-comment.
+        while self.level < MIN_STEP_LEVEL || self.needs_expansion() || self.needs_expansion_deep() {
             expansion = expansion.saturating_add(1usize << (self.level.saturating_sub(1)));
             self.expand_root();
         }
@@ -560,10 +563,6 @@ impl HashLife {
     /// sub-quadrants are `nw.se`, `ne.sw`, `sw.ne`, and `se.nw` (the four inner
     /// corners that together form the center half of the root).  All 12 outer
     /// grandchildren must therefore be empty.
-    ///
-    /// The previous implementation only checked the 4 corner grandchildren
-    /// (`nw.nw`, `ne.ne`, `sw.sw`, `se.se`), missing patterns that reach the
-    /// edge-but-not-corner regions (e.g. `nw.ne`, `ne.nw`, `sw.se`, etc.).
     fn needs_expansion(&self) -> bool {
         let r = self.nodes[self.root as usize];
         let nw = self.nodes[r.nw as usize];
@@ -584,6 +583,58 @@ impl HashLife {
             || self.nodes[se.ne as usize].pop > 0
             || self.nodes[se.sw as usize].pop > 0
             || self.nodes[se.se as usize].pop > 0
+    }
+
+    /// Returns `true` if live cells are too close to the inner boundary of the
+    /// step result window to survive the next step without escaping.
+    ///
+    /// `step_recursive(root)` returns the center half `[N/4, 3N/4)` advanced by
+    /// `2^(level−2)` generations.  Any live cell that drifts beyond `[N/4, 3N/4)`
+    /// during that interval is silently lost from the result.  After re-centring
+    /// the result is placed back at `[N/4, 3N/4)`, so `needs_expansion()` always
+    /// sees an empty outer ring — the level would never grow on its own.
+    ///
+    /// This deeper check inspects the **outer three great-grandchildren** of each
+    /// of the four safe grandchildren (`nw.se`, `ne.sw`, `sw.ne`, `se.nw`).
+    /// Those 12 slots cover the band `[N/4, 3N/8) ∪ (5N/8, 3N/4)` — the half of
+    /// the safe zone that is closest to the result boundary.  If anything lives
+    /// there, one more `expand_root()` call is needed before the step.
+    ///
+    /// After a single `expand_root()` the affected cells move to the inner-most
+    /// great-grandchild of the enlarged universe's safe zone, giving them a full
+    /// `3N/8` gap to the new result boundary — enough headroom for any pattern
+    /// moving at up to `c/2`.
+    ///
+    /// Requires `level ≥ 4` (great-grandchildren must be at least level 1).
+    fn needs_expansion_deep(&self) -> bool {
+        if self.level < 4 {
+            return false;
+        }
+        let r = self.nodes[self.root as usize];
+        let nw = self.nodes[r.nw as usize];
+        let ne = self.nodes[r.ne as usize];
+        let sw = self.nodes[r.sw as usize];
+        let se = self.nodes[r.se as usize];
+
+        // Safe grandchildren (inner corners of the root).
+        let nw_se = self.nodes[nw.se as usize]; // inner = nw_se.se
+        let ne_sw = self.nodes[ne.sw as usize]; // inner = ne_sw.sw
+        let sw_ne = self.nodes[sw.ne as usize]; // inner = sw_ne.ne
+        let se_nw = self.nodes[se.nw as usize]; // inner = se_nw.nw
+
+        // Outer 3 great-grandchildren of each safe grandchild must be empty.
+        self.nodes[nw_se.nw as usize].pop > 0
+            || self.nodes[nw_se.ne as usize].pop > 0
+            || self.nodes[nw_se.sw as usize].pop > 0
+            || self.nodes[ne_sw.nw as usize].pop > 0
+            || self.nodes[ne_sw.ne as usize].pop > 0
+            || self.nodes[ne_sw.se as usize].pop > 0
+            || self.nodes[sw_ne.nw as usize].pop > 0
+            || self.nodes[sw_ne.sw as usize].pop > 0
+            || self.nodes[sw_ne.se as usize].pop > 0
+            || self.nodes[se_nw.ne as usize].pop > 0
+            || self.nodes[se_nw.sw as usize].pop > 0
+            || self.nodes[se_nw.se as usize].pop > 0
     }
 
     /// Returns the canonical level-(k-1) node whose NE quadrant is `a.NE` and
@@ -1167,6 +1218,83 @@ mod tests {
             swar.live_count(),
             hl.population(),
             "SWAR and HashLife must agree after ≥60 blinker generations (total HL gens: {total})"
+        );
+    }
+
+    /// A cell in nw.se.nw (outer great-grandchild of the safe zone, NOT the safe
+    /// great-grandchild nw.se.se) must trigger `needs_expansion_deep`.  Without
+    /// this deeper check the cordership gun diverges from SWAR around gen 10000+
+    /// because corderships drift out of the step-result window and are silently
+    /// dropped.
+    #[test]
+    fn test_needs_expansion_deep_catches_near_boundary() {
+        let mut hl = HashLife::new();
+        // nw.se covers [N/4, N/2) × [N/4, N/2).
+        // nw.se.nw (outer GGC) covers [N/4, 3N/8) × [N/4, 3N/8) — near boundary.
+        // nw.se.se (safe  GGC) covers [3N/8, N/2) × [3N/8, N/2) — inner quarter.
+        let n = hl.width();
+        let quarter = n / 4;
+        let eighth = n / 8;
+        // Place a cell in nw.se.nw (near-boundary), which is inside the safe
+        // grandchild but outside the safe great-grandchild.
+        hl.set(quarter + 1, quarter + 1, true); // in [N/4, 3N/8) × [N/4, 3N/8)
+        assert!(
+            !hl.needs_expansion(),
+            "cell in nw.se (inner half) must NOT trigger needs_expansion"
+        );
+        assert!(
+            hl.needs_expansion_deep(),
+            "cell in nw.se.nw (outer GGC of safe zone) must trigger needs_expansion_deep"
+        );
+
+        // A cell in nw.se.se (the safe great-grandchild, inner quarter) must NOT
+        // trigger the deep check.
+        let mut hl2 = HashLife::new();
+        hl2.set(quarter + eighth + 1, quarter + eighth + 1, true); // in [3N/8, N/2)
+        assert!(
+            !hl2.needs_expansion_deep(),
+            "cell in nw.se.se (inner great-grandchild) must NOT trigger needs_expansion_deep"
+        );
+        let _ = eighth;
+    }
+
+    /// A single glider (c/4 diagonal spaceship) run long enough to trigger
+    /// `needs_expansion_deep` must agree with SWAR.  Without the deeper check
+    /// the glider drifts into the near-boundary zone, escapes the step-result
+    /// window on the following step, and is silently dropped — causing HL
+    /// population to fall to 0 while SWAR still shows 5.
+    #[test]
+    fn test_hashlife_swar_agree_glider_long() {
+        use crate::grid::Grid;
+
+        // Standard SE glider (period 4, speed c/4 diagonal).
+        let cells: &[(i32, i32)] = &[(0, 1), (1, 2), (2, 0), (2, 1), (2, 2)];
+
+        let mut hl = HashLife::new();
+        hl.set_cells(cells);
+
+        // Run until ≥ 500 gens.  HL step size may grow due to expansion, so
+        // `total` might overshoot; we then run SWAR to the same `total`.
+        let mut total = 0u64;
+        while total < 500 {
+            let (g, _) = hl.step_universe();
+            total += g;
+        }
+
+        let mut swar = Grid::new(2000, 2000);
+        let origin = 1000i32;
+        for &(dr, dc) in cells {
+            swar.set((origin + dr) as usize, (origin + dc) as usize, true);
+        }
+        for _ in 0..total {
+            swar.step();
+            swar.expand_if_needed();
+        }
+
+        assert_eq!(
+            swar.live_count(),
+            hl.population(),
+            "SWAR and HashLife must agree at gen {total} for a glider"
         );
     }
 }
