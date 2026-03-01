@@ -158,6 +158,22 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
                     .range(1..=MAX_STEPS_PER_FRAME)
                     .speed(0.5),
             );
+
+            if is_hl {
+                ui.separator();
+                ui.label("HL step:");
+                ui.add(
+                    egui::DragValue::new(&mut app.sim.hl_step_log2)
+                        .range(0..=62u8)
+                        .speed(0.25)
+                        .prefix("2^"),
+                )
+                .on_hover_text(
+                    "Each HashLife step advances 2^j generations.\n\
+                     j=0→1 gen, j=10→1024 gens.",
+                );
+                ui.label(format!("= {} gen/step", 1u64 << app.sim.hl_step_log2));
+            }
         });
     });
 }
