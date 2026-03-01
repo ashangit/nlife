@@ -52,6 +52,11 @@ pub(crate) struct Simulation {
     pub(crate) time_since_last_step: f64,
     /// Number of simulation steps to advance per visual frame.
     pub(crate) steps_per_frame: u32,
+    /// Log₂ of the HashLife step size (generations per step = 2^hl_step_log2).
+    ///
+    /// Propagated to the [`HashLife`] engine before each step.  Has no effect
+    /// when the SWAR engine is active.
+    pub(crate) hl_step_log2: u8,
 }
 
 impl Simulation {
@@ -64,6 +69,7 @@ impl Simulation {
             speed: DEFAULT_SPEED,
             time_since_last_step: 0.0,
             steps_per_frame: 1,
+            hl_step_log2: 0,
         }
     }
 
@@ -256,8 +262,9 @@ impl Simulation {
     /// `(add_top, add_left)` for scroll compensation.
     ///
     /// For SWAR, this is always 1 generation.  For HashLife, the generation
-    /// counter is incremented by `2^(level−2)` and the returned expansion is
-    /// equal on all four sides (symmetric grid growth).
+    /// counter is incremented by `2^effective_j` where
+    /// `effective_j = hl_step_log2.min(level−2)`, and the returned expansion
+    /// is equal on all four sides (symmetric grid growth).
     pub(crate) fn step_once(&mut self) -> (usize, usize) {
         match &mut self.engine {
             Engine::Swar(grid) => {
@@ -266,6 +273,7 @@ impl Simulation {
                 grid.expand_if_needed()
             }
             Engine::HashLife(hl) => {
+                hl.set_step_log2(self.hl_step_log2);
                 let (gens, expansion) = hl.step_universe();
                 self.generation += gens;
                 (expansion, expansion)
@@ -412,16 +420,39 @@ mod tests {
         assert_eq!(sim.generation, 42);
     }
 
-    /// step_once on HashLife increments generation by more than 1.
+    // ── Variable step-size (hl_step_log2) tests ──────────────────────────────
+    //
+    // These tests reference `Simulation::hl_step_log2` and the propagation of
+    // that field to the HashLife engine before each step.  They are written
+    // *before* the implementation and will fail to compile until it exists.
+
+    /// When hl_step_log2=0, a single step_once call on a HashLife simulation
+    /// must advance generation by exactly 1.
+    #[test]
+    fn test_simulation_hl_step_log2_propagates() {
+        let mut sim = Simulation::new();
+        sim.toggle_engine(); // switch to HashLife
+
+        // Load a blinker so there is something live to step.
+        sim.load_cells(&[(0, -1), (0, 0), (0, 1)]);
+        assert!(sim.is_hashlife());
+
+        sim.hl_step_log2 = 0;
+        sim.step_once();
+
+        assert_eq!(
+            sim.generation, 1,
+            "hl_step_log2=0 must cause step_once to advance generation by exactly 1"
+        );
+    }
+
+    /// step_once on HashLife increments generation by 1 when hl_step_log2=0 (default).
     #[test]
     fn test_hashlife_step_increments_generation_by_step_size() {
         let mut sim = Simulation::new();
         sim.toggle_engine(); // switch to HashLife
-        let Engine::HashLife(ref hl) = sim.engine else {
-            panic!()
-        };
-        let expected = hl.step_size();
+        // default hl_step_log2=0 → 2^0 = 1 generation per step
         sim.step_once();
-        assert_eq!(sim.generation, expected);
+        assert_eq!(sim.generation, 1);
     }
 }

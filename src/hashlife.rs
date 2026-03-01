@@ -256,6 +256,12 @@ pub(crate) struct HashLife {
     pub(crate) level: u8,
     /// Total generations elapsed since last clear / load.
     pub(crate) generation: u64,
+    /// Log₂ of the number of generations to advance per step.
+    ///
+    /// Each call to [`step_universe`](HashLife::step_universe) advances
+    /// `2^step_log2` generations (clamped to `level - 2` when level is too
+    /// small).  Default `0` → 1 generation per step.
+    pub(crate) step_log2: u8,
 }
 
 impl HashLife {
@@ -284,6 +290,7 @@ impl HashLife {
             root: 0,
             level: 0,
             generation: 0,
+            step_log2: 0,
         };
         let root = hl.make_dead_node(DEFAULT_LEVEL);
         hl.root = root;
@@ -486,13 +493,21 @@ impl HashLife {
         self.nodes[self.root as usize].pop
     }
 
-    /// Returns the number of generations advanced by a single call to
-    /// [`step_universe`](HashLife::step_universe): `2^(level−2)`.
-    pub(crate) fn step_size(&self) -> u64 {
-        1u64 << (self.level as u32).saturating_sub(2)
+    /// Sets the log₂ of the step size and clears the step cache if it changed.
+    ///
+    /// The value is clamped to 62 to avoid shifting past `u64` range.
+    /// Because `j` is baked into the memoised step results, the cache must be
+    /// invalidated whenever it changes.
+    pub(crate) fn set_step_log2(&mut self, j: u8) {
+        let j = j.min(62);
+        if j != self.step_log2 {
+            self.step_log2 = j;
+            self.step_cache.clear();
+        }
     }
 
-    /// Advances the universe by `2^(level−2)` generations.
+    /// Advances the universe by `2^effective_j` generations, where
+    /// `effective_j = step_log2.min(level - 2)`.
     ///
     /// Expands the root as needed, runs `step_recursive`, re-centres the
     /// result, and returns `(gens_advanced, expansion_per_side)` where
@@ -505,19 +520,25 @@ impl HashLife {
 
         let mut expansion: usize = 0;
 
-        // Ensure at least MIN_STEP_LEVEL, that outer quadrants are empty, and
-        // that live cells are not in the near-boundary band of the safe zone.
+        // Ensure at least MIN_STEP_LEVEL (and enough room for the requested
+        // step size), that outer quadrants are empty, and that live cells are
+        // not in the near-boundary band of the safe zone.
         // The deeper check (`needs_expansion_deep`) prevents cells from drifting
         // out of the step-result window during a step; see its doc-comment.
-        while self.level < MIN_STEP_LEVEL || self.needs_expansion() || self.needs_expansion_deep() {
+        while self.level < (self.step_log2 as u32 + 2).max(MIN_STEP_LEVEL as u32) as u8
+            || self.needs_expansion()
+            || self.needs_expansion_deep()
+        {
             expansion = expansion.saturating_add(1usize << (self.level.saturating_sub(1)));
             self.expand_root();
         }
 
-        let gens = self.step_size();
+        // Recompute effective_j now that level may have grown from expansion.
+        let effective_j = self.step_log2.min(self.level.saturating_sub(2));
+        let gens = 1u64 << effective_j;
 
         // Compute the center half of the universe advanced by gens generations.
-        let result = self.step_recursive(self.root);
+        let result = self.step_recursive(self.root, effective_j);
 
         // Re-centre: wrap result back into a same-level root with dead padding.
         let result_level = self.nodes[result as usize].level;
@@ -766,19 +787,30 @@ impl HashLife {
         self.make_node(r_nw, r_ne, r_sw, r_se)
     }
 
-    /// Memoised recursive step: advances `node` by `2^(level−2)` generations
-    /// and returns the canonical level-(k-1) result.
+    /// Memoised recursive step.
     ///
-    /// For level 2 this delegates to `step_level2`; for level k ≥ 3 it uses
-    /// the 9-submacrocell algorithm (two rounds of recursive stepping on 4×4
-    /// half-size overlapping tiles).
-    fn step_recursive(&mut self, node: NodeId) -> NodeId {
+    /// Advances `node` (level `k`) by `2^j` generations and returns the
+    /// canonical level-(k-1) result.
+    ///
+    /// * `j == level - 2` → **full step**: two waves of recursion, each
+    ///   advancing `2^(j-1)` gens, for a total of `2^j` gens.
+    /// * `j < level - 2` → **partial step**: one wave only, advancing `2^j`
+    ///   gens into a level-(k-1) intermediate that is returned directly
+    ///   (no second wave).
+    ///
+    /// For level 2 (`j` must be 0), delegates to `step_level2`.
+    ///
+    /// The cache key is `node` alone — valid because `j` is constant
+    /// throughout a single top-level `step_universe` call and the cache is
+    /// cleared by `set_step_log2` whenever `j` changes.
+    fn step_recursive(&mut self, node: NodeId, j: u8) -> NodeId {
         if let Some(&cached) = self.step_cache.get(&node) {
             return cached;
         }
 
         let level = self.nodes[node as usize].level;
         let result = if level == 2 {
+            debug_assert_eq!(j, 0, "j must be 0 at level-2 base case");
             self.step_level2(node)
         } else {
             let (nw, ne, sw, se) = {
@@ -797,30 +829,60 @@ impl HashLife {
             let t7 = self.horiz(sw, se);
             let t8 = se;
 
-            // ── Step each → level k-2, advanced 2^(k-3) gens ─────────────────
-            let s0 = self.step_recursive(t0);
-            let s1 = self.step_recursive(t1);
-            let s2 = self.step_recursive(t2);
-            let s3 = self.step_recursive(t3);
-            let s4 = self.step_recursive(t4);
-            let s5 = self.step_recursive(t5);
-            let s6 = self.step_recursive(t6);
-            let s7 = self.step_recursive(t7);
-            let s8 = self.step_recursive(t8);
+            if j == level - 2 {
+                // ── Full step: two recursive waves ────────────────────────────
+                // Wave 1: each sub-macrocell (level k-1) stepped by j-1 gens.
+                let j1 = j - 1;
+                let s0 = self.step_recursive(t0, j1);
+                let s1 = self.step_recursive(t1, j1);
+                let s2 = self.step_recursive(t2, j1);
+                let s3 = self.step_recursive(t3, j1);
+                let s4 = self.step_recursive(t4, j1);
+                let s5 = self.step_recursive(t5, j1);
+                let s6 = self.step_recursive(t6, j1);
+                let s7 = self.step_recursive(t7, j1);
+                let s8 = self.step_recursive(t8, j1);
 
-            // ── Combine into 4 level-(k-1) nodes ─────────────────────────────
-            let u0 = self.make_node(s0, s1, s3, s4);
-            let u1 = self.make_node(s1, s2, s4, s5);
-            let u2 = self.make_node(s3, s4, s6, s7);
-            let u3 = self.make_node(s4, s5, s7, s8);
+                // ── Combine into 4 level-(k-1) nodes ─────────────────────────
+                let u0 = self.make_node(s0, s1, s3, s4);
+                let u1 = self.make_node(s1, s2, s4, s5);
+                let u2 = self.make_node(s3, s4, s6, s7);
+                let u3 = self.make_node(s4, s5, s7, s8);
 
-            // ── Step each again → another 2^(k-3) gens ───────────────────────
-            let r0 = self.step_recursive(u0);
-            let r1 = self.step_recursive(u1);
-            let r2 = self.step_recursive(u2);
-            let r3 = self.step_recursive(u3);
+                // Wave 2: step the 4 combined nodes by another j-1 gens.
+                let r0 = self.step_recursive(u0, j1);
+                let r1 = self.step_recursive(u1, j1);
+                let r2 = self.step_recursive(u2, j1);
+                let r3 = self.step_recursive(u3, j1);
 
-            self.make_node(r0, r1, r2, r3)
+                self.make_node(r0, r1, r2, r3)
+            } else {
+                // ── Partial step: one wave + center4 assembly ─────────────────
+                // Each sub-macrocell (level k-1) stepped by j gens, returning
+                // level-(k-2) results.  (When j == (k-1)-2, this is a full
+                // step on the sub-macrocell; otherwise it recurses as partial.)
+                let s0 = self.step_recursive(t0, j);
+                let s1 = self.step_recursive(t1, j);
+                let s2 = self.step_recursive(t2, j);
+                let s3 = self.step_recursive(t3, j);
+                let s4 = self.step_recursive(t4, j);
+                let s5 = self.step_recursive(t5, j);
+                let s6 = self.step_recursive(t6, j);
+                let s7 = self.step_recursive(t7, j);
+                let s8 = self.step_recursive(t8, j);
+
+                // Extract the 4 quadrants of the level-(k-1) result by applying
+                // center4 to each overlapping group of 4 stepped sub-macrocells.
+                // center4(a, b, c, d) = make_node(a.se, b.sw, c.ne, d.nw), which
+                // picks one inner corner from each, so there is no double-counting
+                // of the overlapping s4.  Total time advance = 2^j (wave 1 only).
+                let r0 = self.center4(s0, s1, s3, s4);
+                let r1 = self.center4(s1, s2, s4, s5);
+                let r2 = self.center4(s3, s4, s6, s7);
+                let r3 = self.center4(s4, s5, s7, s8);
+
+                self.make_node(r0, r1, r2, r3)
+            }
         };
 
         self.step_cache.insert(node, result);
@@ -1282,13 +1344,6 @@ mod tests {
         assert_eq!(hl2.population(), 3);
     }
 
-    /// step_size returns 2^(level-2).
-    #[test]
-    fn test_step_size() {
-        let hl = HashLife::new();
-        assert_eq!(hl.step_size(), 1u64 << (DEFAULT_LEVEL as u32 - 2));
-    }
-
     /// A live cell in nw.ne (top-centre-left, NOT the corner nw.nw) must trigger
     /// needs_expansion.  The old four-corner check missed this region, causing
     /// step_recursive to run with a dirty boundary and produce wrong results for
@@ -1478,6 +1533,162 @@ mod tests {
             hl.nodes.len() < before,
             "GC must reclaim nodes: before={before}, after={}",
             hl.nodes.len()
+        );
+    }
+
+    // ── Variable step-size (step_log2) tests ─────────────────────────────────
+    //
+    // These tests reference `HashLife::set_step_log2` and the updated
+    // `step_size()` / `step_universe()` behaviour that will be added by the
+    // TODO 2.5 implementation.  They are intentionally written *before* the
+    // implementation exists and will fail to compile until it is complete.
+
+    /// With step_log2=0, a single step_universe call must advance exactly
+    /// 1 generation and keep blinker population at 3.
+    #[test]
+    fn test_step_log2_zero_advances_1_gen() {
+        let mut hl = HashLife::new();
+        let half = hl.width() / 2;
+        hl.set(half, half - 1, true);
+        hl.set(half, half, true);
+        hl.set(half, half + 1, true);
+        assert_eq!(hl.population(), 3);
+
+        hl.set_step_log2(0);
+        let (gens, _) = hl.step_universe();
+
+        assert_eq!(gens, 1, "step_log2=0 must advance exactly 1 generation");
+        assert_eq!(
+            hl.population(),
+            3,
+            "blinker population must remain 3 after 1 gen"
+        );
+    }
+
+    /// With step_log2 = level - 2, step_universe must advance exactly
+    /// 2^(level-2) generations (the maximum for that level).
+    #[test]
+    fn test_step_log2_full_matches_level_minus_2() {
+        let mut hl = HashLife::new();
+        let half = hl.width() / 2;
+        hl.set(half, half - 1, true);
+        hl.set(half, half, true);
+        hl.set(half, half + 1, true);
+
+        // Prime expansion: one step_universe call ensures the level has settled
+        // to at least MIN_STEP_LEVEL after internal expansion.
+        hl.set_step_log2(0);
+        hl.step_universe();
+
+        // Now set step_log2 to the full level-2 value for the current level.
+        let level_before = hl.level;
+        let j = level_before - 2;
+        hl.set_step_log2(j);
+
+        let (gens, _) = hl.step_universe();
+        let expected = 1u64 << (j as u32);
+        assert_eq!(
+            gens, expected,
+            "step_log2={j} at level {level_before} must advance {expected} gens, got {gens}"
+        );
+    }
+
+    /// step_log2 field must equal j after set_step_log2(j), for j in [0, 1, 5].
+    #[test]
+    fn test_step_size_returns_2_pow_step_log2() {
+        let mut hl = HashLife::new();
+        for j in [0u8, 1, 5] {
+            hl.set_step_log2(j);
+            assert_eq!(
+                hl.step_log2, j,
+                "step_log2 must equal {j} after set_step_log2({j})"
+            );
+        }
+    }
+
+    /// With step_log2=0, HashLife and SWAR must agree on population at every
+    /// individual step for 20 generations of a blinker.
+    #[test]
+    fn test_step_log2_zero_agrees_with_swar() {
+        use crate::grid::Grid;
+
+        // Blinker in SWAR (200×200 grid).
+        let mut swar = Grid::new(200, 200);
+        swar.set(100, 99, true);
+        swar.set(100, 100, true);
+        swar.set(100, 101, true);
+
+        // Same blinker in HashLife with step_log2=0.
+        let mut hl = HashLife::new();
+        hl.set_cells(&[(0, -1), (0, 0), (0, 1)]);
+        hl.set_step_log2(0);
+
+        for step in 0..20 {
+            swar.step();
+            swar.expand_if_needed();
+            let (gens, _) = hl.step_universe();
+            assert_eq!(
+                gens, 1,
+                "step {step}: step_log2=0 must advance exactly 1 gen"
+            );
+            assert_eq!(
+                swar.live_count(),
+                hl.population(),
+                "step {step}: SWAR and HashLife populations must match"
+            );
+        }
+    }
+
+    /// Stepping with step_log2=3 once (8 gens) must give the same final
+    /// population as stepping 8 times with step_log2=0.
+    /// The blinker has period 2, so 8 steps (even) always leaves pop=3.
+    #[test]
+    fn test_step_log2_large_matches_repeated_small() {
+        let blinker: &[(i32, i32)] = &[(0, -1), (0, 0), (0, 1)];
+
+        // hl_big: one step at step_log2=3 (8 gens).
+        let mut hl_big = HashLife::new();
+        hl_big.set_cells(blinker);
+        hl_big.set_step_log2(3);
+        let (big_gens, _) = hl_big.step_universe();
+        assert_eq!(big_gens, 8, "step_log2=3 must advance 8 gens");
+
+        // hl_small: eight steps at step_log2=0 (1 gen each).
+        let mut hl_small = HashLife::new();
+        hl_small.set_cells(blinker);
+        hl_small.set_step_log2(0);
+        let mut small_total = 0u64;
+        for _ in 0..8 {
+            let (g, _) = hl_small.step_universe();
+            small_total += g;
+        }
+        assert_eq!(small_total, 8, "8 × step_log2=0 must total 8 gens");
+
+        assert_eq!(
+            hl_big.population(),
+            hl_small.population(),
+            "population after 8 gens must match regardless of step granularity"
+        );
+    }
+
+    /// Setting step_log2=7 and calling step_universe must not panic and must
+    /// leave hl.level >= j + 2 = 9, since expansion is required before stepping.
+    #[test]
+    fn test_expansion_enforces_level_ge_j_plus_2() {
+        let mut hl = HashLife::new();
+        let half = hl.width() / 2;
+        hl.set(half, half - 1, true);
+        hl.set(half, half, true);
+        hl.set(half, half + 1, true);
+
+        hl.set_step_log2(7);
+        // Must not panic even though j=7 requires level >= 9.
+        hl.step_universe();
+
+        assert!(
+            hl.level >= 9,
+            "after step_log2=7 the level must be >= 9 (j+2), got {}",
+            hl.level
         );
     }
 

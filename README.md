@@ -23,6 +23,9 @@ and rendered via wgpu on Wayland.
 - **Random fill** — 🎲 button fills the grid at a configurable density (1–100 %)
 - **Two simulation engines** — switch between the SWAR bit-packed engine and the
   HashLife quadtree-memoised engine; both are exposed through the same `Simulation` API
+- **HashLife step size** — when HashLife is active, a `HL step: 2^j` drag widget sets
+  how many generations each step advances (`2^j`); `j=0` → 1 gen/step (default),
+  `j=10` → 1024 gens/step; changing `j` invalidates the step cache automatically
 
 ### Grid
 - **Auto-expanding grid** — the canvas grows automatically (20-cell dead margin) whenever
@@ -199,8 +202,8 @@ Key components:
 |-----------|-------------|
 | `CanonTable` | Purpose-built open-addressing intern table; 20-byte `CanonEntry` structs, linear probing, 75 % load factor, FxHasher on two packed `u64` words |
 | `step_cache: FxHashMap<NodeId, NodeId>` | Memoised `step_recursive` results; valid across `expand_root` calls |
-| `step_recursive` | 9-submacrocell algorithm; advances level-k node by `2^(k−2)` generations, returning a level-(k−1) result |
-| `step_universe` | Public entry point; expands the root as needed (both `needs_expansion` and `needs_expansion_deep`), calls `step_recursive`, re-centres the result |
+| `step_recursive(node, j)` | 9-submacrocell algorithm; advances level-k node by `2^j` generations and returns a level-(k−1) result; `j == level−2` → full two-wave step; `j < level−2` → single-wave partial step |
+| `step_universe` | Public entry point; expands the root until `level ≥ j+2` and boundaries are clear, calls `step_recursive(root, effective_j)`, re-centres the result; `effective_j = step_log2.min(level−2)` |
 
 **Expansion policy**: before each step two checks are performed:
 - `needs_expansion()` — all 12 outer grandchildren must be empty (cells inside `[N/4, 3N/4)`)
