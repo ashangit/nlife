@@ -96,33 +96,6 @@ highest to lowest impact / easiest to hardest.
 
 ## 2. Performance — HashLife Engine
 
-**2.1 — Open-addressing node intern table** ★ *Root cause of 32% cache-miss rate*
-Replace `HashMap<(NodeId,NodeId,NodeId,NodeId), NodeId>` with a flat
-open-addressing table (Robin Hood or quadratic probing). Better spatial locality
-means fewer LLC misses per node lookup. This directly attacks the 32.66%
-cache-miss rate and 0.76 IPC.
-A purpose-built table avoids the `hashbrown` overhead visible in flamegraph
-(`find_inner` 12%, `make_node` 29%).
-
-**2.2 — Garbage collection** ★ *Root cause of 241 MB peak heap*
-The node table grows to 241 MB and never shrinks (vs 38 MB for SWAR). For
-long-running sessions memory continues to grow unboundedly, worsening cache
-pressure over time. Add mark-and-sweep GC from the root after each
-`step_universe` call (or when table exceeds a threshold), freeing unreachable
-nodes and compacting the table.
-
-**2.3 — 4×4 → 2×2 lookup table for `step_level2`**
-Replace the brute-force bitop loop in `step_level2` with a precomputed
-`[u16; 65536]` table. One array access replaces ~60 bitops. Easy to implement;
-reduces `step_recursive` leaf call cost. Profiling shows `step_recursive`
-at ~34%; the level-2 base case is called millions of times per `step_universe`.
-
-**2.4 — `FxHashMap` instead of `std::HashMap`**
-The flamegraph shows `hashbrown::find_inner` at 12% — using `rustc-hash`'s
-`FxHashMap` (already a dependency) instead of `std::HashMap` reduces hashing
-cost. This is a one-line change in `hashlife.rs` and a free win before
-implementing the full open-addressing table (2.1).
-
 **2.5 — Variable step size**
 Currently `step_universe` always advances by `2^(level-2)` generations.
 Accept a target step count and expand/contract the root level on demand so
