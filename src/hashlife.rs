@@ -506,7 +506,6 @@ impl HashLife {
         }
     }
 
-
     /// Advances the universe by `2^effective_j` generations, where
     /// `effective_j = step_log2.min(level - 2)`.
     ///
@@ -1345,7 +1344,6 @@ mod tests {
         assert_eq!(hl2.population(), 3);
     }
 
-
     /// A live cell in nw.ne (top-centre-left, NOT the corner nw.nw) must trigger
     /// needs_expansion.  The old four-corner check missed this region, causing
     /// step_recursive to run with a dirty boundary and produce wrong results for
@@ -1602,8 +1600,7 @@ mod tests {
         for j in [0u8, 1, 5] {
             hl.set_step_log2(j);
             assert_eq!(
-                hl.step_log2,
-                j,
+                hl.step_log2, j,
                 "step_log2 must equal {j} after set_step_log2({j})"
             );
         }
