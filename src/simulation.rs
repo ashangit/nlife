@@ -262,8 +262,9 @@ impl Simulation {
     /// `(add_top, add_left)` for scroll compensation.
     ///
     /// For SWAR, this is always 1 generation.  For HashLife, the generation
-    /// counter is incremented by `2^(level−2)` and the returned expansion is
-    /// equal on all four sides (symmetric grid growth).
+    /// counter is incremented by `2^effective_j` where
+    /// `effective_j = hl_step_log2.min(level−2)`, and the returned expansion
+    /// is equal on all four sides (symmetric grid growth).
     pub(crate) fn step_once(&mut self) -> (usize, usize) {
         match &mut self.engine {
             Engine::Swar(grid) => {
