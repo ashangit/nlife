@@ -1060,18 +1060,14 @@ fn center4_in_store(
 fn step_level2_in_store(store: &HashLifeStore, node: NodeId) -> NodeId {
     let table = STEP_LEVEL2_TABLE.get_or_init(build_step_level2_table);
 
-    let (n_nw, n_ne, n_sw, n_se) = {
-        let nodes = store.nodes.lock().unwrap();
-        let n = nodes[node as usize];
-        (n.nw, n.ne, n.sw, n.se)
-    };
     let (nw, ne, sw, se) = {
         let nodes = store.nodes.lock().unwrap();
+        let n = nodes[node as usize];
         (
-            nodes[n_nw as usize],
-            nodes[n_ne as usize],
-            nodes[n_sw as usize],
-            nodes[n_se as usize],
+            nodes[n.nw as usize],
+            nodes[n.ne as usize],
+            nodes[n.sw as usize],
+            nodes[n.se as usize],
         )
     };
 
