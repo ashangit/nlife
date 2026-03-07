@@ -542,13 +542,22 @@ impl HashLife {
         // Ensure at least MIN_STEP_LEVEL (and enough room for the requested
         // step size), that outer quadrants are empty, and that live cells are
         // not in the near-boundary band of the safe zone.
-        // The deeper check (`needs_expansion_deep`) prevents cells from drifting
-        // out of the step-result window during a step; see its doc-comment.
-        while self.level < (self.step_log2 as u32 + 2).max(MIN_STEP_LEVEL as u32) as u8
-            || self.needs_expansion()
-            || self.needs_expansion_deep()
-        {
-            expansion = expansion.saturating_add(1usize << (self.level.saturating_sub(1)));
+        // The deeper check (`needs_expansion_deep_inner`) prevents cells from
+        // drifting out of the step-result window during a step; see its
+        // doc-comment.  All three conditions are checked under a single lock
+        // acquisition per iteration to reduce mutex overhead.
+        let min_level = (self.step_log2 as u32 + 2).max(MIN_STEP_LEVEL as u32) as u8;
+        loop {
+            let needs_expand = {
+                let nodes = self.store.nodes.lock().unwrap();
+                self.level < min_level
+                    || needs_expansion_inner(&nodes, self.root)
+                    || needs_expansion_deep_inner(&nodes, self.root, self.level)
+            };
+            if !needs_expand {
+                break;
+            }
+            expansion = expansion.saturating_add(1usize << self.level.saturating_sub(1));
             self.expand_root();
         }
 
@@ -560,10 +569,10 @@ impl HashLife {
         let result = step_recursive(&self.store, self.root, effective_j);
 
         // Re-centre: wrap result back into a same-level root with dead padding.
-        let result_level = self.store.nodes.lock().unwrap()[result as usize].level;
-        let (r_nw, r_ne, r_sw, r_se) = {
-            let n = self.store.nodes.lock().unwrap()[result as usize];
-            (n.nw, n.ne, n.sw, n.se)
+        let (result_level, r_nw, r_ne, r_sw, r_se) = {
+            let nodes = self.store.nodes.lock().unwrap();
+            let n = nodes[result as usize];
+            (n.level, n.nw, n.ne, n.sw, n.se)
         };
         let d = self.make_dead_node(result_level.saturating_sub(1));
         let new_nw = self.make_node(d, d, d, r_nw);
@@ -614,90 +623,6 @@ impl HashLife {
         let new_se = make_node_in_store(&self.store, se, d, d, d);
         self.root = make_node_in_store(&self.store, new_nw, new_ne, new_sw, new_se);
         self.level = old_level + 1;
-    }
-
-    /// Returns `true` if any outer grandchild of the root contains live cells,
-    /// indicating the pattern is too close to the boundary for a correct step.
-    ///
-    /// For `step_recursive(root)` to produce a correct center result, the outer
-    /// three sub-quadrants of every root child must be all-dead.  The only safe
-    /// sub-quadrants are `nw.se`, `ne.sw`, `sw.ne`, and `se.nw` (the four inner
-    /// corners that together form the center half of the root).  All 12 outer
-    /// grandchildren must therefore be empty.
-    fn needs_expansion(&self) -> bool {
-        let nodes = self.store.nodes.lock().unwrap();
-        let r = nodes[self.root as usize];
-        let nw = nodes[r.nw as usize];
-        let ne = nodes[r.ne as usize];
-        let sw = nodes[r.sw as usize];
-        let se = nodes[r.se as usize];
-        // All 12 outer grandchildren must be empty.
-        // Only nw.se / ne.sw / sw.ne / se.nw are safe interior quadrants.
-        nodes[nw.nw as usize].pop > 0
-            || nodes[nw.ne as usize].pop > 0
-            || nodes[nw.sw as usize].pop > 0
-            || nodes[ne.nw as usize].pop > 0
-            || nodes[ne.ne as usize].pop > 0
-            || nodes[ne.se as usize].pop > 0
-            || nodes[sw.nw as usize].pop > 0
-            || nodes[sw.sw as usize].pop > 0
-            || nodes[sw.se as usize].pop > 0
-            || nodes[se.ne as usize].pop > 0
-            || nodes[se.sw as usize].pop > 0
-            || nodes[se.se as usize].pop > 0
-    }
-
-    /// Returns `true` if live cells are too close to the inner boundary of the
-    /// step result window to survive the next step without escaping.
-    ///
-    /// `step_recursive(root)` returns the center half `[N/4, 3N/4)` advanced by
-    /// `2^(level−2)` generations.  Any live cell that drifts beyond `[N/4, 3N/4)`
-    /// during that interval is silently lost from the result.  After re-centring
-    /// the result is placed back at `[N/4, 3N/4)`, so `needs_expansion()` always
-    /// sees an empty outer ring — the level would never grow on its own.
-    ///
-    /// This deeper check inspects the **outer three great-grandchildren** of each
-    /// of the four safe grandchildren (`nw.se`, `ne.sw`, `sw.ne`, `se.nw`).
-    /// Those 12 slots cover the band `[N/4, 3N/8) ∪ (5N/8, 3N/4)` — the half of
-    /// the safe zone that is closest to the result boundary.  If anything lives
-    /// there, one more `expand_root()` call is needed before the step.
-    ///
-    /// After a single `expand_root()` the affected cells move to the inner-most
-    /// great-grandchild of the enlarged universe's safe zone, giving them a full
-    /// `3N/8` gap to the new result boundary — enough headroom for any pattern
-    /// moving at up to `c/2`.
-    ///
-    /// Requires `level ≥ 4` (great-grandchildren must be at least level 1).
-    fn needs_expansion_deep(&self) -> bool {
-        if self.level < 4 {
-            return false;
-        }
-        let nodes = self.store.nodes.lock().unwrap();
-        let r = nodes[self.root as usize];
-        let nw = nodes[r.nw as usize];
-        let ne = nodes[r.ne as usize];
-        let sw = nodes[r.sw as usize];
-        let se = nodes[r.se as usize];
-
-        // Safe grandchildren (inner corners of the root).
-        let nw_se = nodes[nw.se as usize]; // inner = nw_se.se
-        let ne_sw = nodes[ne.sw as usize]; // inner = ne_sw.sw
-        let sw_ne = nodes[sw.ne as usize]; // inner = sw_ne.ne
-        let se_nw = nodes[se.nw as usize]; // inner = se_nw.nw
-
-        // Outer 3 great-grandchildren of each safe grandchild must be empty.
-        nodes[nw_se.nw as usize].pop > 0
-            || nodes[nw_se.ne as usize].pop > 0
-            || nodes[nw_se.sw as usize].pop > 0
-            || nodes[ne_sw.nw as usize].pop > 0
-            || nodes[ne_sw.ne as usize].pop > 0
-            || nodes[ne_sw.se as usize].pop > 0
-            || nodes[sw_ne.nw as usize].pop > 0
-            || nodes[sw_ne.sw as usize].pop > 0
-            || nodes[sw_ne.se as usize].pop > 0
-            || nodes[se_nw.ne as usize].pop > 0
-            || nodes[se_nw.sw as usize].pop > 0
-            || nodes[se_nw.se as usize].pop > 0
     }
 
     // ── Garbage collection ────────────────────────────────────────────────────
@@ -953,6 +878,90 @@ impl HashLife {
 }
 
 // ── Free functions operating on HashLifeStore ─────────────────────────────────
+
+/// Returns `true` if any outer grandchild of `root` contains live cells,
+/// indicating the pattern is too close to the boundary for a correct step.
+///
+/// For `step_recursive(root)` to produce a correct center result, the outer
+/// three sub-quadrants of every root child must be all-dead.  The only safe
+/// sub-quadrants are `nw.se`, `ne.sw`, `sw.ne`, and `se.nw` (the four inner
+/// corners that together form the center half of the root).  All 12 outer
+/// grandchildren must therefore be empty.
+///
+/// Takes the `nodes` slice directly so the caller can hold the lock for the
+/// duration of all expansion checks (no redundant lock acquisitions).
+fn needs_expansion_inner(nodes: &[Node], root: NodeId) -> bool {
+    let r = nodes[root as usize];
+    let nw = nodes[r.nw as usize];
+    let ne = nodes[r.ne as usize];
+    let sw = nodes[r.sw as usize];
+    let se = nodes[r.se as usize];
+    // All 12 outer grandchildren must be empty.
+    // Only nw.se / ne.sw / sw.ne / se.nw are safe interior quadrants.
+    nodes[nw.nw as usize].pop > 0
+        || nodes[nw.ne as usize].pop > 0
+        || nodes[nw.sw as usize].pop > 0
+        || nodes[ne.nw as usize].pop > 0
+        || nodes[ne.ne as usize].pop > 0
+        || nodes[ne.se as usize].pop > 0
+        || nodes[sw.nw as usize].pop > 0
+        || nodes[sw.sw as usize].pop > 0
+        || nodes[sw.se as usize].pop > 0
+        || nodes[se.ne as usize].pop > 0
+        || nodes[se.sw as usize].pop > 0
+        || nodes[se.se as usize].pop > 0
+}
+
+/// Returns `true` if live cells are too close to the inner boundary of the
+/// step result window to survive the next step without escaping.
+///
+/// `step_recursive(root)` returns the center half `[N/4, 3N/4)` advanced by
+/// `2^(level−2)` generations.  Any live cell that drifts beyond `[N/4, 3N/4)`
+/// during that interval is silently lost from the result.  After re-centring
+/// the result is placed back at `[N/4, 3N/4)`, so `needs_expansion_inner()`
+/// always sees an empty outer ring — the level would never grow on its own.
+///
+/// This deeper check inspects the **outer three great-grandchildren** of each
+/// of the four safe grandchildren (`nw.se`, `ne.sw`, `sw.ne`, `se.nw`).
+/// Those 12 slots cover the band `[N/4, 3N/8) ∪ (5N/8, 3N/4)` — the half of
+/// the safe zone that is closest to the result boundary.  If anything lives
+/// there, one more `expand_root()` call is needed before the step.
+///
+/// Requires `level ≥ 4` (great-grandchildren must be at least level 1); returns
+/// `false` immediately for smaller levels.
+///
+/// Takes the `nodes` slice directly so the caller can hold the lock for the
+/// duration of all expansion checks (no redundant lock acquisitions).
+fn needs_expansion_deep_inner(nodes: &[Node], root: NodeId, level: u8) -> bool {
+    if level < 4 {
+        return false;
+    }
+    let r = nodes[root as usize];
+    let nw = nodes[r.nw as usize];
+    let ne = nodes[r.ne as usize];
+    let sw = nodes[r.sw as usize];
+    let se = nodes[r.se as usize];
+
+    // Safe grandchildren (inner corners of the root).
+    let nw_se = nodes[nw.se as usize]; // inner = nw_se.se
+    let ne_sw = nodes[ne.sw as usize]; // inner = ne_sw.sw
+    let sw_ne = nodes[sw.ne as usize]; // inner = sw_ne.ne
+    let se_nw = nodes[se.nw as usize]; // inner = se_nw.nw
+
+    // Outer 3 great-grandchildren of each safe grandchild must be empty.
+    nodes[nw_se.nw as usize].pop > 0
+        || nodes[nw_se.ne as usize].pop > 0
+        || nodes[nw_se.sw as usize].pop > 0
+        || nodes[ne_sw.nw as usize].pop > 0
+        || nodes[ne_sw.ne as usize].pop > 0
+        || nodes[ne_sw.se as usize].pop > 0
+        || nodes[sw_ne.nw as usize].pop > 0
+        || nodes[sw_ne.sw as usize].pop > 0
+        || nodes[sw_ne.se as usize].pop > 0
+        || nodes[se_nw.ne as usize].pop > 0
+        || nodes[se_nw.sw as usize].pop > 0
+        || nodes[se_nw.se as usize].pop > 0
+}
 
 /// Canonicalises a level-k node by interning it in the store's `canon`.
 ///
@@ -1459,8 +1468,9 @@ mod tests {
         // nw.ne covers rows [0..quarter), cols [quarter..half) — NOT the corner.
         let quarter = hl.width() / 4;
         hl.set(0, quarter + 1, true); // row=0, col=quarter+1 → in nw.ne
+        let nodes = hl.store.nodes.lock().unwrap();
         assert!(
-            hl.needs_expansion(),
+            needs_expansion_inner(&nodes, hl.root),
             "cell in nw.ne must trigger needs_expansion (edge-but-not-corner bug)"
         );
     }
@@ -1501,10 +1511,10 @@ mod tests {
     }
 
     /// A cell in nw.se.nw (outer great-grandchild of the safe zone, NOT the safe
-    /// great-grandchild nw.se.se) must trigger `needs_expansion_deep`.  Without
-    /// this deeper check the cordership gun diverges from SWAR around gen 10000+
-    /// because corderships drift out of the step-result window and are silently
-    /// dropped.
+    /// great-grandchild nw.se.se) must trigger `needs_expansion_deep_inner`.
+    /// Without this deeper check the cordership gun diverges from SWAR around
+    /// gen 10000+ because corderships drift out of the step-result window and
+    /// are silently dropped.
     #[test]
     fn test_needs_expansion_deep_catches_near_boundary() {
         let mut hl = HashLife::new();
@@ -1517,23 +1527,29 @@ mod tests {
         // Place a cell in nw.se.nw (near-boundary), which is inside the safe
         // grandchild but outside the safe great-grandchild.
         hl.set(quarter + 1, quarter + 1, true); // in [N/4, 3N/8) × [N/4, 3N/8)
-        assert!(
-            !hl.needs_expansion(),
-            "cell in nw.se (inner half) must NOT trigger needs_expansion"
-        );
-        assert!(
-            hl.needs_expansion_deep(),
-            "cell in nw.se.nw (outer GGC of safe zone) must trigger needs_expansion_deep"
-        );
+        {
+            let nodes = hl.store.nodes.lock().unwrap();
+            assert!(
+                !needs_expansion_inner(&nodes, hl.root),
+                "cell in nw.se (inner half) must NOT trigger needs_expansion"
+            );
+            assert!(
+                needs_expansion_deep_inner(&nodes, hl.root, hl.level),
+                "cell in nw.se.nw (outer GGC of safe zone) must trigger needs_expansion_deep"
+            );
+        }
 
         // A cell in nw.se.se (the safe great-grandchild, inner quarter) must NOT
         // trigger the deep check.
         let mut hl2 = HashLife::new();
         hl2.set(quarter + eighth + 1, quarter + eighth + 1, true); // in [3N/8, N/2)
-        assert!(
-            !hl2.needs_expansion_deep(),
-            "cell in nw.se.se (inner great-grandchild) must NOT trigger needs_expansion_deep"
-        );
+        {
+            let nodes = hl2.store.nodes.lock().unwrap();
+            assert!(
+                !needs_expansion_deep_inner(&nodes, hl2.root, hl2.level),
+                "cell in nw.se.se (inner great-grandchild) must NOT trigger needs_expansion_deep"
+            );
+        }
         let _ = eighth;
     }
 
