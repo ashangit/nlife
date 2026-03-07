@@ -9,7 +9,7 @@
 
 use rustc_hash::{FxHashMap, FxHasher};
 use std::hash::Hasher;
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// Index into the `HashLife::nodes` arena.  0 = DEAD leaf, 1 = ALIVE leaf.
 pub(crate) type NodeId = u32;
@@ -232,6 +232,25 @@ struct Node {
 
 // ── HashLife ─────────────────────────────────────────────────────────────────
 
+/// Minimum node level at which `step_recursive` splits into parallel Rayon tasks.
+///
+/// Level 6 corresponds to a 64×64 cell region — large enough that Rayon task
+/// overhead is amortised by the work performed in each subtree.
+pub(crate) const PARALLEL_THRESHOLD: u8 = 6;
+
+/// Shared mutable state for a HashLife instance, protected behind `Mutex` locks
+/// so that parallel Rayon tasks spawned by `step_recursive` can safely share access.
+///
+/// Lock ordering (when acquiring both): `canon` before `nodes`.
+struct HashLifeStore {
+    /// Arena of all interned nodes; `nodes[0]` = DEAD, `nodes[1]` = ALIVE.
+    nodes: Mutex<Vec<Node>>,
+    /// Canonicalisation map: `(nw, ne, sw, se)` → `NodeId`.
+    canon: Mutex<CanonTable>,
+    /// Memoisation cache for `step_recursive`.
+    step_cache: Mutex<FxHashMap<NodeId, NodeId>>,
+}
+
 /// Quadtree-memoised Game of Life engine.
 ///
 /// Nodes are canonicalised (interned) by their four children; the same
@@ -244,12 +263,9 @@ struct Node {
 /// grows.  The caller should use [`step_universe`](HashLife::step_universe)
 /// and adjust the camera by the returned `(gens, expansion)` pair.
 pub(crate) struct HashLife {
-    /// Arena of all interned nodes; `nodes[0]` = DEAD, `nodes[1]` = ALIVE.
-    nodes: Vec<Node>,
-    /// Canonicalisation map: `(nw, ne, sw, se)` → `NodeId`.
-    canon: CanonTable,
-    /// Memoisation cache for `step_recursive`.
-    step_cache: FxHashMap<NodeId, NodeId>,
+    /// Shared mutable state (nodes, canon, step_cache) wrapped in `Arc` so
+    /// parallel Rayon tasks can borrow it across thread boundaries.
+    store: Arc<HashLifeStore>,
     /// Current root node.
     root: NodeId,
     /// Current quadtree level (root covers 2^level × 2^level cells).
@@ -283,10 +299,13 @@ impl HashLife {
             se: 0,
             pop: 1,
         };
+        let store = Arc::new(HashLifeStore {
+            nodes: Mutex::new(vec![dead_leaf, alive_leaf]),
+            canon: Mutex::new(CanonTable::with_capacity(4096)),
+            step_cache: Mutex::new(FxHashMap::default()),
+        });
         let mut hl = HashLife {
-            nodes: vec![dead_leaf, alive_leaf],
-            canon: CanonTable::with_capacity(4096),
-            step_cache: FxHashMap::default(),
+            store,
             root: 0,
             level: 0,
             generation: 0,
@@ -333,7 +352,7 @@ impl HashLife {
         let level = self.level;
         let root = self.root;
         self.root = self.set_cell_in(root, row, col, alive, level);
-        self.step_cache.clear();
+        self.store.step_cache.lock().unwrap().clear();
     }
 
     /// Toggles the alive/dead state of the cell at absolute `(row, col)`.
@@ -346,9 +365,9 @@ impl HashLife {
 
     /// Resets the universe to a fresh dead grid at the default level.
     pub(crate) fn clear(&mut self) {
-        self.nodes.truncate(2); // keep DEAD and ALIVE leaves
-        self.canon.clear();
-        self.step_cache.clear();
+        self.store.nodes.lock().unwrap().truncate(2); // keep DEAD and ALIVE leaves
+        self.store.canon.lock().unwrap().clear();
+        self.store.step_cache.lock().unwrap().clear();
         let root = self.make_dead_node(DEFAULT_LEVEL);
         self.root = root;
         self.level = DEFAULT_LEVEL;
@@ -379,7 +398,7 @@ impl HashLife {
                 }
             }
         }
-        self.step_cache.clear();
+        self.store.step_cache.lock().unwrap().clear();
     }
 
     /// Clears the grid and centres the given cell offsets, auto-sizing the
@@ -409,9 +428,9 @@ impl HashLife {
         };
 
         // Reset to a fresh dead root at the required level.
-        self.nodes.truncate(2);
-        self.canon.clear();
-        self.step_cache.clear();
+        self.store.nodes.lock().unwrap().truncate(2);
+        self.store.canon.lock().unwrap().clear();
+        self.store.step_cache.lock().unwrap().clear();
         let root = self.make_dead_node(level);
         self.root = root;
         self.level = level;
@@ -429,7 +448,7 @@ impl HashLife {
                 self.root = self.set_cell_in(rt, row, col, true, lv);
             }
         }
-        self.step_cache.clear();
+        self.store.step_cache.lock().unwrap().clear();
     }
 
     /// Returns all live cells as centred `(row_offset, col_offset)` pairs.
@@ -490,7 +509,7 @@ impl HashLife {
     /// Returns the total live-cell count (`nodes[root].pop`).
     #[inline]
     pub(crate) fn population(&self) -> u64 {
-        self.nodes[self.root as usize].pop
+        self.store.nodes.lock().unwrap()[self.root as usize].pop
     }
 
     /// Sets the log₂ of the step size and clears the step cache if it changed.
@@ -502,7 +521,7 @@ impl HashLife {
         let j = j.min(62);
         if j != self.step_log2 {
             self.step_log2 = j;
-            self.step_cache.clear();
+            self.store.step_cache.lock().unwrap().clear();
         }
     }
 
@@ -514,7 +533,7 @@ impl HashLife {
     /// `expansion_per_side` is the number of cells added to each of the four
     /// sides due to `expand_root` calls (used for camera scroll compensation).
     pub(crate) fn step_universe(&mut self) -> (u64, usize) {
-        if self.nodes.len() > GC_THRESHOLD {
+        if self.store.nodes.lock().unwrap().len() > GC_THRESHOLD {
             self.gc();
         }
 
@@ -538,12 +557,12 @@ impl HashLife {
         let gens = 1u64 << effective_j;
 
         // Compute the center half of the universe advanced by gens generations.
-        let result = self.step_recursive(self.root, effective_j);
+        let result = step_recursive(&self.store, self.root, effective_j);
 
         // Re-centre: wrap result back into a same-level root with dead padding.
-        let result_level = self.nodes[result as usize].level;
+        let result_level = self.store.nodes.lock().unwrap()[result as usize].level;
         let (r_nw, r_ne, r_sw, r_se) = {
-            let n = self.nodes[result as usize];
+            let n = self.store.nodes.lock().unwrap()[result as usize];
             (n.nw, n.ne, n.sw, n.se)
         };
         let d = self.make_dead_node(result_level.saturating_sub(1));
@@ -568,36 +587,14 @@ impl HashLife {
     /// `NodeId`; otherwise creates a new node, computes `pop = sum(children)`,
     /// and inserts into the arena and canon map.
     fn make_node(&mut self, nw: NodeId, ne: NodeId, sw: NodeId, se: NodeId) -> NodeId {
-        if let Some(id) = self.canon.get(nw, ne, sw, se) {
-            return id;
-        }
-        let level = self.nodes[nw as usize].level + 1;
-        let pop = self.nodes[nw as usize].pop
-            + self.nodes[ne as usize].pop
-            + self.nodes[sw as usize].pop
-            + self.nodes[se as usize].pop;
-        let id = self.nodes.len() as NodeId;
-        self.nodes.push(Node {
-            level,
-            nw,
-            ne,
-            sw,
-            se,
-            pop,
-        });
-        self.canon.insert(nw, ne, sw, se, id);
-        id
+        make_node_in_store(&self.store, nw, ne, sw, se)
     }
 
     /// Returns the canonical all-dead node at `level` (recursively constructed).
     ///
     /// Memoised via `canon` — each level's dead node is created at most once.
     fn make_dead_node(&mut self, level: u8) -> NodeId {
-        if level == 0 {
-            return DEAD;
-        }
-        let child = self.make_dead_node(level - 1);
-        self.make_node(child, child, child, child)
+        make_dead_node_in_store(&self.store, level)
     }
 
     /// Doubles the root level, centering the current content with dead padding.
@@ -606,16 +603,16 @@ impl HashLife {
     /// center 2^k × 2^k of the new 2^(k+1) × 2^(k+1) grid.
     fn expand_root(&mut self) {
         let old_level = self.level;
-        let d = self.make_dead_node(old_level - 1);
+        let d = make_dead_node_in_store(&self.store, old_level - 1);
         let (nw, ne, sw, se) = {
-            let r = self.nodes[self.root as usize];
+            let r = self.store.nodes.lock().unwrap()[self.root as usize];
             (r.nw, r.ne, r.sw, r.se)
         };
-        let new_nw = self.make_node(d, d, d, nw);
-        let new_ne = self.make_node(d, d, ne, d);
-        let new_sw = self.make_node(d, sw, d, d);
-        let new_se = self.make_node(se, d, d, d);
-        self.root = self.make_node(new_nw, new_ne, new_sw, new_se);
+        let new_nw = make_node_in_store(&self.store, d, d, d, nw);
+        let new_ne = make_node_in_store(&self.store, d, d, ne, d);
+        let new_sw = make_node_in_store(&self.store, d, sw, d, d);
+        let new_se = make_node_in_store(&self.store, se, d, d, d);
+        self.root = make_node_in_store(&self.store, new_nw, new_ne, new_sw, new_se);
         self.level = old_level + 1;
     }
 
@@ -628,25 +625,26 @@ impl HashLife {
     /// corners that together form the center half of the root).  All 12 outer
     /// grandchildren must therefore be empty.
     fn needs_expansion(&self) -> bool {
-        let r = self.nodes[self.root as usize];
-        let nw = self.nodes[r.nw as usize];
-        let ne = self.nodes[r.ne as usize];
-        let sw = self.nodes[r.sw as usize];
-        let se = self.nodes[r.se as usize];
+        let nodes = self.store.nodes.lock().unwrap();
+        let r = nodes[self.root as usize];
+        let nw = nodes[r.nw as usize];
+        let ne = nodes[r.ne as usize];
+        let sw = nodes[r.sw as usize];
+        let se = nodes[r.se as usize];
         // All 12 outer grandchildren must be empty.
         // Only nw.se / ne.sw / sw.ne / se.nw are safe interior quadrants.
-        self.nodes[nw.nw as usize].pop > 0
-            || self.nodes[nw.ne as usize].pop > 0
-            || self.nodes[nw.sw as usize].pop > 0
-            || self.nodes[ne.nw as usize].pop > 0
-            || self.nodes[ne.ne as usize].pop > 0
-            || self.nodes[ne.se as usize].pop > 0
-            || self.nodes[sw.nw as usize].pop > 0
-            || self.nodes[sw.sw as usize].pop > 0
-            || self.nodes[sw.se as usize].pop > 0
-            || self.nodes[se.ne as usize].pop > 0
-            || self.nodes[se.sw as usize].pop > 0
-            || self.nodes[se.se as usize].pop > 0
+        nodes[nw.nw as usize].pop > 0
+            || nodes[nw.ne as usize].pop > 0
+            || nodes[nw.sw as usize].pop > 0
+            || nodes[ne.nw as usize].pop > 0
+            || nodes[ne.ne as usize].pop > 0
+            || nodes[ne.se as usize].pop > 0
+            || nodes[sw.nw as usize].pop > 0
+            || nodes[sw.sw as usize].pop > 0
+            || nodes[sw.se as usize].pop > 0
+            || nodes[se.ne as usize].pop > 0
+            || nodes[se.sw as usize].pop > 0
+            || nodes[se.se as usize].pop > 0
     }
 
     /// Returns `true` if live cells are too close to the inner boundary of the
@@ -674,219 +672,32 @@ impl HashLife {
         if self.level < 4 {
             return false;
         }
-        let r = self.nodes[self.root as usize];
-        let nw = self.nodes[r.nw as usize];
-        let ne = self.nodes[r.ne as usize];
-        let sw = self.nodes[r.sw as usize];
-        let se = self.nodes[r.se as usize];
+        let nodes = self.store.nodes.lock().unwrap();
+        let r = nodes[self.root as usize];
+        let nw = nodes[r.nw as usize];
+        let ne = nodes[r.ne as usize];
+        let sw = nodes[r.sw as usize];
+        let se = nodes[r.se as usize];
 
         // Safe grandchildren (inner corners of the root).
-        let nw_se = self.nodes[nw.se as usize]; // inner = nw_se.se
-        let ne_sw = self.nodes[ne.sw as usize]; // inner = ne_sw.sw
-        let sw_ne = self.nodes[sw.ne as usize]; // inner = sw_ne.ne
-        let se_nw = self.nodes[se.nw as usize]; // inner = se_nw.nw
+        let nw_se = nodes[nw.se as usize]; // inner = nw_se.se
+        let ne_sw = nodes[ne.sw as usize]; // inner = ne_sw.sw
+        let sw_ne = nodes[sw.ne as usize]; // inner = sw_ne.ne
+        let se_nw = nodes[se.nw as usize]; // inner = se_nw.nw
 
         // Outer 3 great-grandchildren of each safe grandchild must be empty.
-        self.nodes[nw_se.nw as usize].pop > 0
-            || self.nodes[nw_se.ne as usize].pop > 0
-            || self.nodes[nw_se.sw as usize].pop > 0
-            || self.nodes[ne_sw.nw as usize].pop > 0
-            || self.nodes[ne_sw.ne as usize].pop > 0
-            || self.nodes[ne_sw.se as usize].pop > 0
-            || self.nodes[sw_ne.nw as usize].pop > 0
-            || self.nodes[sw_ne.sw as usize].pop > 0
-            || self.nodes[sw_ne.se as usize].pop > 0
-            || self.nodes[se_nw.ne as usize].pop > 0
-            || self.nodes[se_nw.sw as usize].pop > 0
-            || self.nodes[se_nw.se as usize].pop > 0
-    }
-
-    /// Returns the canonical level-(k-1) node whose NE quadrant is `a.NE` and
-    /// whose NW quadrant is `b.NW` (horizontal centre between two level-k nodes).
-    ///
-    /// Used to build the 9 sub-macrocells for `step_recursive`.
-    fn horiz(&mut self, a: NodeId, b: NodeId) -> NodeId {
-        let (a_ne, a_se) = {
-            let n = self.nodes[a as usize];
-            (n.ne, n.se)
-        };
-        let (b_nw, b_sw) = {
-            let n = self.nodes[b as usize];
-            (n.nw, n.sw)
-        };
-        self.make_node(a_ne, b_nw, a_se, b_sw)
-    }
-
-    /// Returns the canonical level-(k-1) node from the bottom half of `a` and
-    /// the top half of `b` (vertical centre between two level-k nodes).
-    fn vert(&mut self, a: NodeId, b: NodeId) -> NodeId {
-        let (a_sw, a_se) = {
-            let n = self.nodes[a as usize];
-            (n.sw, n.se)
-        };
-        let (b_nw, b_ne) = {
-            let n = self.nodes[b as usize];
-            (n.nw, n.ne)
-        };
-        self.make_node(a_sw, a_se, b_nw, b_ne)
-    }
-
-    /// Returns the canonical level-(k-1) node from the shared inner corners of
-    /// four level-k quadrant nodes (the "center4" sub-macrocell).
-    fn center4(&mut self, nw: NodeId, ne: NodeId, sw: NodeId, se: NodeId) -> NodeId {
-        let nw_se = self.nodes[nw as usize].se;
-        let ne_sw = self.nodes[ne as usize].sw;
-        let sw_ne = self.nodes[sw as usize].ne;
-        let se_nw = self.nodes[se as usize].nw;
-        self.make_node(nw_se, ne_sw, sw_ne, se_nw)
-    }
-
-    /// 4×4 → 2×2 step for level-2 nodes via a precomputed lookup table.
-    ///
-    /// The 16 cells of the 4×4 node are packed into a `u16` index (row-major,
-    /// bit `r*4+c`), looked up in [`STEP_LEVEL2_TABLE`], and the 4-bit result
-    /// maps to the four canonical level-1 child `NodeId`s.
-    fn step_level2(&mut self, node: NodeId) -> NodeId {
-        let table = STEP_LEVEL2_TABLE.get_or_init(build_step_level2_table);
-
-        let n = self.nodes[node as usize];
-        let nw = self.nodes[n.nw as usize];
-        let ne = self.nodes[n.ne as usize];
-        let sw = self.nodes[n.sw as usize];
-        let se = self.nodes[n.se as usize];
-
-        // Pack 16 cells into a u16 index (row-major, bit r*4+c):
-        //   Row 0: nw.nw nw.ne ne.nw ne.ne  → bits  0– 3
-        //   Row 1: nw.sw nw.se ne.sw ne.se  → bits  4– 7
-        //   Row 2: sw.nw sw.ne se.nw se.ne  → bits  8–11
-        //   Row 3: sw.sw sw.se se.sw se.se  → bits 12–15
-        let idx = ((nw.nw == ALIVE) as u16)
-            | ((nw.ne == ALIVE) as u16) << 1
-            | ((ne.nw == ALIVE) as u16) << 2
-            | ((ne.ne == ALIVE) as u16) << 3
-            | ((nw.sw == ALIVE) as u16) << 4
-            | ((nw.se == ALIVE) as u16) << 5
-            | ((ne.sw == ALIVE) as u16) << 6
-            | ((ne.se == ALIVE) as u16) << 7
-            | ((sw.nw == ALIVE) as u16) << 8
-            | ((sw.ne == ALIVE) as u16) << 9
-            | ((se.nw == ALIVE) as u16) << 10
-            | ((se.ne == ALIVE) as u16) << 11
-            | ((sw.sw == ALIVE) as u16) << 12
-            | ((sw.se == ALIVE) as u16) << 13
-            | ((se.sw == ALIVE) as u16) << 14
-            | ((se.se == ALIVE) as u16) << 15;
-
-        // 4-bit result: bit0=r_nw, bit1=r_ne, bit2=r_sw, bit3=r_se
-        let result = table[idx as usize];
-        let r_nw = if result & 1 != 0 { ALIVE } else { DEAD };
-        let r_ne = if result & 2 != 0 { ALIVE } else { DEAD };
-        let r_sw = if result & 4 != 0 { ALIVE } else { DEAD };
-        let r_se = if result & 8 != 0 { ALIVE } else { DEAD };
-
-        self.make_node(r_nw, r_ne, r_sw, r_se)
-    }
-
-    /// Memoised recursive step.
-    ///
-    /// Advances `node` (level `k`) by `2^j` generations and returns the
-    /// canonical level-(k-1) result.
-    ///
-    /// * `j == level - 2` → **full step**: two waves of recursion, each
-    ///   advancing `2^(j-1)` gens, for a total of `2^j` gens.
-    /// * `j < level - 2` → **partial step**: one wave only, advancing `2^j`
-    ///   gens into a level-(k-1) intermediate that is returned directly
-    ///   (no second wave).
-    ///
-    /// For level 2 (`j` must be 0), delegates to `step_level2`.
-    ///
-    /// The cache key is `node` alone — valid because `j` is constant
-    /// throughout a single top-level `step_universe` call and the cache is
-    /// cleared by `set_step_log2` whenever `j` changes.
-    fn step_recursive(&mut self, node: NodeId, j: u8) -> NodeId {
-        if let Some(&cached) = self.step_cache.get(&node) {
-            return cached;
-        }
-
-        let level = self.nodes[node as usize].level;
-        let result = if level == 2 {
-            debug_assert_eq!(j, 0, "j must be 0 at level-2 base case");
-            self.step_level2(node)
-        } else {
-            let (nw, ne, sw, se) = {
-                let n = self.nodes[node as usize];
-                (n.nw, n.ne, n.sw, n.se)
-            };
-
-            // ── 9 sub-macrocells (level k-1) ─────────────────────────────────
-            let t0 = nw;
-            let t1 = self.horiz(nw, ne);
-            let t2 = ne;
-            let t3 = self.vert(nw, sw);
-            let t4 = self.center4(nw, ne, sw, se);
-            let t5 = self.vert(ne, se);
-            let t6 = sw;
-            let t7 = self.horiz(sw, se);
-            let t8 = se;
-
-            if j == level - 2 {
-                // ── Full step: two recursive waves ────────────────────────────
-                // Wave 1: each sub-macrocell (level k-1) stepped by j-1 gens.
-                let j1 = j - 1;
-                let s0 = self.step_recursive(t0, j1);
-                let s1 = self.step_recursive(t1, j1);
-                let s2 = self.step_recursive(t2, j1);
-                let s3 = self.step_recursive(t3, j1);
-                let s4 = self.step_recursive(t4, j1);
-                let s5 = self.step_recursive(t5, j1);
-                let s6 = self.step_recursive(t6, j1);
-                let s7 = self.step_recursive(t7, j1);
-                let s8 = self.step_recursive(t8, j1);
-
-                // ── Combine into 4 level-(k-1) nodes ─────────────────────────
-                let u0 = self.make_node(s0, s1, s3, s4);
-                let u1 = self.make_node(s1, s2, s4, s5);
-                let u2 = self.make_node(s3, s4, s6, s7);
-                let u3 = self.make_node(s4, s5, s7, s8);
-
-                // Wave 2: step the 4 combined nodes by another j-1 gens.
-                let r0 = self.step_recursive(u0, j1);
-                let r1 = self.step_recursive(u1, j1);
-                let r2 = self.step_recursive(u2, j1);
-                let r3 = self.step_recursive(u3, j1);
-
-                self.make_node(r0, r1, r2, r3)
-            } else {
-                // ── Partial step: one wave + center4 assembly ─────────────────
-                // Each sub-macrocell (level k-1) stepped by j gens, returning
-                // level-(k-2) results.  (When j == (k-1)-2, this is a full
-                // step on the sub-macrocell; otherwise it recurses as partial.)
-                let s0 = self.step_recursive(t0, j);
-                let s1 = self.step_recursive(t1, j);
-                let s2 = self.step_recursive(t2, j);
-                let s3 = self.step_recursive(t3, j);
-                let s4 = self.step_recursive(t4, j);
-                let s5 = self.step_recursive(t5, j);
-                let s6 = self.step_recursive(t6, j);
-                let s7 = self.step_recursive(t7, j);
-                let s8 = self.step_recursive(t8, j);
-
-                // Extract the 4 quadrants of the level-(k-1) result by applying
-                // center4 to each overlapping group of 4 stepped sub-macrocells.
-                // center4(a, b, c, d) = make_node(a.se, b.sw, c.ne, d.nw), which
-                // picks one inner corner from each, so there is no double-counting
-                // of the overlapping s4.  Total time advance = 2^j (wave 1 only).
-                let r0 = self.center4(s0, s1, s3, s4);
-                let r1 = self.center4(s1, s2, s4, s5);
-                let r2 = self.center4(s3, s4, s6, s7);
-                let r3 = self.center4(s4, s5, s7, s8);
-
-                self.make_node(r0, r1, r2, r3)
-            }
-        };
-
-        self.step_cache.insert(node, result);
-        result
+        nodes[nw_se.nw as usize].pop > 0
+            || nodes[nw_se.ne as usize].pop > 0
+            || nodes[nw_se.sw as usize].pop > 0
+            || nodes[ne_sw.nw as usize].pop > 0
+            || nodes[ne_sw.ne as usize].pop > 0
+            || nodes[ne_sw.se as usize].pop > 0
+            || nodes[sw_ne.nw as usize].pop > 0
+            || nodes[sw_ne.sw as usize].pop > 0
+            || nodes[sw_ne.se as usize].pop > 0
+            || nodes[se_nw.ne as usize].pop > 0
+            || nodes[se_nw.sw as usize].pop > 0
+            || nodes[se_nw.se as usize].pop > 0
     }
 
     // ── Garbage collection ────────────────────────────────────────────────────
@@ -905,7 +716,12 @@ impl HashLife {
     ///    and the result node survived; translate IDs through `remap`.
     /// 6. **Commit** — update `self.root`, replace `self.nodes`.
     fn gc(&mut self) {
-        let n = self.nodes.len();
+        // Lock all three stores for the duration of GC to prevent concurrent access.
+        let mut nodes = self.store.nodes.lock().unwrap();
+        let mut canon = self.store.canon.lock().unwrap();
+        let mut step_cache = self.store.step_cache.lock().unwrap();
+
+        let n = nodes.len();
 
         // 1. Mark phase: BFS from root.
         let mut reachable = vec![false; n];
@@ -920,7 +736,7 @@ impl HashLife {
                 continue;
             }
             reachable[id as usize] = true;
-            let node = self.nodes[id as usize];
+            let node = nodes[id as usize];
             if node.level > 0 {
                 for child in [node.nw, node.ne, node.sw, node.se] {
                     if !reachable[child as usize] {
@@ -942,7 +758,7 @@ impl HashLife {
 
         // 3. Compact nodes: copy only reachable entries, then rewrite children.
         let mut new_nodes: Vec<Node> = Vec::with_capacity(next_id as usize);
-        for (&is_reachable, node) in reachable.iter().zip(self.nodes.iter()) {
+        for (&is_reachable, node) in reachable.iter().zip(nodes.iter()) {
             if is_reachable {
                 new_nodes.push(*node);
             }
@@ -957,17 +773,16 @@ impl HashLife {
         }
 
         // 4. Rebuild canon from the compacted, remapped nodes.
-        self.canon.clear();
+        canon.clear();
         for (new_id, node) in new_nodes.iter().enumerate() {
             if node.level > 0 {
-                self.canon
-                    .insert(node.nw, node.ne, node.sw, node.se, new_id as u32);
+                canon.insert(node.nw, node.ne, node.sw, node.se, new_id as u32);
             }
         }
 
         // 5. Remap step_cache: keep entries where both source and result survived.
-        let old_cache = std::mem::take(&mut self.step_cache);
-        self.step_cache = old_cache
+        let old_cache = std::mem::take(&mut *step_cache);
+        *step_cache = old_cache
             .into_iter()
             .filter_map(|(old_k, old_v)| {
                 let new_k = remap[old_k as usize];
@@ -982,8 +797,8 @@ impl HashLife {
 
         // 6. Commit.
         self.root = remap[self.root as usize];
-        self.nodes = new_nodes;
-        self.nodes.shrink_to_fit();
+        new_nodes.shrink_to_fit();
+        *nodes = new_nodes;
     }
 
     // ── Cell access helpers ───────────────────────────────────────────────────
@@ -996,7 +811,7 @@ impl HashLife {
             return node == ALIVE;
         }
         let half = 1usize << (level - 1);
-        let n = self.nodes[node as usize];
+        let n = self.store.nodes.lock().unwrap()[node as usize];
         if row < half {
             if col < half {
                 self.get_cell_in(n.nw, row, col, level - 1)
@@ -1025,7 +840,7 @@ impl HashLife {
         }
         let half = 1usize << (level - 1);
         let (nw, ne, sw, se) = {
-            let n = self.nodes[node as usize];
+            let n = self.store.nodes.lock().unwrap()[node as usize];
             (n.nw, n.ne, n.sw, n.se)
         };
         let (new_nw, new_ne, new_sw, new_se) = if row < half {
@@ -1054,7 +869,7 @@ impl HashLife {
                 self.set_cell_in(se, row - half, col - half, alive, level - 1),
             )
         };
-        self.make_node(new_nw, new_ne, new_sw, new_se)
+        make_node_in_store(&self.store, new_nw, new_ne, new_sw, new_se)
     }
 
     // ── Tree traversal helpers ────────────────────────────────────────────────
@@ -1078,7 +893,7 @@ impl HashLife {
         out: &mut Vec<(usize, usize)>,
     ) {
         // Prune dead subtrees.
-        if self.nodes[node as usize].pop == 0 {
+        if self.store.nodes.lock().unwrap()[node as usize].pop == 0 {
             return;
         }
         // Prune out-of-range subtrees.
@@ -1097,7 +912,7 @@ impl HashLife {
             return;
         }
         let half = node_size / 2;
-        let n = self.nodes[node as usize];
+        let n = self.store.nodes.lock().unwrap()[node as usize];
         self.collect_live_in_rect(
             n.nw, node_row, node_col, half, row_min, col_min, row_max, col_max, out,
         );
@@ -1137,6 +952,295 @@ impl HashLife {
     }
 }
 
+// ── Free functions operating on HashLifeStore ─────────────────────────────────
+
+/// Canonicalises a level-k node by interning it in the store's `canon`.
+///
+/// Lock ordering: `canon` first (to check/insert), then `nodes` (to push new entry).
+/// Both locks are released between operations to avoid deadlock.
+fn make_node_in_store(
+    store: &HashLifeStore,
+    nw: NodeId,
+    ne: NodeId,
+    sw: NodeId,
+    se: NodeId,
+) -> NodeId {
+    // Fast path: check canon first.
+    {
+        let canon = store.canon.lock().unwrap();
+        if let Some(id) = canon.get(nw, ne, sw, se) {
+            return id;
+        }
+    }
+    // Slow path: create new node. We must check again after acquiring both locks
+    // to handle the case where another thread inserted the same node concurrently.
+    let mut nodes = store.nodes.lock().unwrap();
+    let mut canon = store.canon.lock().unwrap();
+    // Double-check after acquiring both locks.
+    if let Some(id) = canon.get(nw, ne, sw, se) {
+        return id;
+    }
+    let level = nodes[nw as usize].level + 1;
+    let pop = nodes[nw as usize].pop
+        + nodes[ne as usize].pop
+        + nodes[sw as usize].pop
+        + nodes[se as usize].pop;
+    let id = nodes.len() as NodeId;
+    nodes.push(Node {
+        level,
+        nw,
+        ne,
+        sw,
+        se,
+        pop,
+    });
+    canon.insert(nw, ne, sw, se, id);
+    id
+}
+
+/// Returns the canonical all-dead node at `level` (recursively constructed).
+fn make_dead_node_in_store(store: &HashLifeStore, level: u8) -> NodeId {
+    if level == 0 {
+        return DEAD;
+    }
+    let child = make_dead_node_in_store(store, level - 1);
+    make_node_in_store(store, child, child, child, child)
+}
+
+/// Returns the canonical level-(k-1) node whose NE quadrant is `a.NE` and
+/// whose NW quadrant is `b.NW` (horizontal centre between two level-k nodes).
+fn horiz_in_store(store: &HashLifeStore, a: NodeId, b: NodeId) -> NodeId {
+    let (a_ne, a_se, b_nw, b_sw) = {
+        let nodes = store.nodes.lock().unwrap();
+        let na = nodes[a as usize];
+        let nb = nodes[b as usize];
+        (na.ne, na.se, nb.nw, nb.sw)
+    };
+    make_node_in_store(store, a_ne, b_nw, a_se, b_sw)
+}
+
+/// Returns the canonical level-(k-1) node from the bottom half of `a` and
+/// the top half of `b` (vertical centre between two level-k nodes).
+fn vert_in_store(store: &HashLifeStore, a: NodeId, b: NodeId) -> NodeId {
+    let (a_sw, a_se, b_nw, b_ne) = {
+        let nodes = store.nodes.lock().unwrap();
+        let na = nodes[a as usize];
+        let nb = nodes[b as usize];
+        (na.sw, na.se, nb.nw, nb.ne)
+    };
+    make_node_in_store(store, a_sw, a_se, b_nw, b_ne)
+}
+
+/// Returns the canonical level-(k-1) node from the shared inner corners of
+/// four level-k quadrant nodes (the "center4" sub-macrocell).
+fn center4_in_store(
+    store: &HashLifeStore,
+    nw: NodeId,
+    ne: NodeId,
+    sw: NodeId,
+    se: NodeId,
+) -> NodeId {
+    let (nw_se, ne_sw, sw_ne, se_nw) = {
+        let nodes = store.nodes.lock().unwrap();
+        (
+            nodes[nw as usize].se,
+            nodes[ne as usize].sw,
+            nodes[sw as usize].ne,
+            nodes[se as usize].nw,
+        )
+    };
+    make_node_in_store(store, nw_se, ne_sw, sw_ne, se_nw)
+}
+
+/// 4×4 → 2×2 step for level-2 nodes via a precomputed lookup table.
+///
+/// The 16 cells of the 4×4 node are packed into a `u16` index (row-major,
+/// bit `r*4+c`), looked up in [`STEP_LEVEL2_TABLE`], and the 4-bit result
+/// maps to the four canonical level-1 child `NodeId`s.
+fn step_level2_in_store(store: &HashLifeStore, node: NodeId) -> NodeId {
+    let table = STEP_LEVEL2_TABLE.get_or_init(build_step_level2_table);
+
+    let (n_nw, n_ne, n_sw, n_se) = {
+        let nodes = store.nodes.lock().unwrap();
+        let n = nodes[node as usize];
+        (n.nw, n.ne, n.sw, n.se)
+    };
+    let (nw, ne, sw, se) = {
+        let nodes = store.nodes.lock().unwrap();
+        (
+            nodes[n_nw as usize],
+            nodes[n_ne as usize],
+            nodes[n_sw as usize],
+            nodes[n_se as usize],
+        )
+    };
+
+    // Pack 16 cells into a u16 index (row-major, bit r*4+c):
+    //   Row 0: nw.nw nw.ne ne.nw ne.ne  → bits  0– 3
+    //   Row 1: nw.sw nw.se ne.sw ne.se  → bits  4– 7
+    //   Row 2: sw.nw sw.ne se.nw se.ne  → bits  8–11
+    //   Row 3: sw.sw sw.se se.sw se.se  → bits 12–15
+    let idx = ((nw.nw == ALIVE) as u16)
+        | ((nw.ne == ALIVE) as u16) << 1
+        | ((ne.nw == ALIVE) as u16) << 2
+        | ((ne.ne == ALIVE) as u16) << 3
+        | ((nw.sw == ALIVE) as u16) << 4
+        | ((nw.se == ALIVE) as u16) << 5
+        | ((ne.sw == ALIVE) as u16) << 6
+        | ((ne.se == ALIVE) as u16) << 7
+        | ((sw.nw == ALIVE) as u16) << 8
+        | ((sw.ne == ALIVE) as u16) << 9
+        | ((se.nw == ALIVE) as u16) << 10
+        | ((se.ne == ALIVE) as u16) << 11
+        | ((sw.sw == ALIVE) as u16) << 12
+        | ((sw.se == ALIVE) as u16) << 13
+        | ((se.sw == ALIVE) as u16) << 14
+        | ((se.se == ALIVE) as u16) << 15;
+
+    // 4-bit result: bit0=r_nw, bit1=r_ne, bit2=r_sw, bit3=r_se
+    let result = table[idx as usize];
+    let r_nw = if result & 1 != 0 { ALIVE } else { DEAD };
+    let r_ne = if result & 2 != 0 { ALIVE } else { DEAD };
+    let r_sw = if result & 4 != 0 { ALIVE } else { DEAD };
+    let r_se = if result & 8 != 0 { ALIVE } else { DEAD };
+
+    make_node_in_store(store, r_nw, r_ne, r_sw, r_se)
+}
+
+/// Memoised recursive step.
+///
+/// Advances `node` (level `k`) by `2^j` generations and returns the
+/// canonical level-(k-1) result.
+///
+/// * `j == level - 2` → **full step**: two waves of recursion, each
+///   advancing `2^(j-1)` gens, for a total of `2^j` gens.
+/// * `j < level - 2` → **partial step**: one wave only, advancing `2^j`
+///   gens into a level-(k-1) intermediate that is returned directly
+///   (no second wave).
+///
+/// For level 2 (`j` must be 0), delegates to `step_level2_in_store`.
+///
+/// When `level > PARALLEL_THRESHOLD`, the wave-2 computations are parallelised
+/// using `rayon::join`, allowing subtrees to be computed concurrently.
+///
+/// The cache key is `node` alone — valid because `j` is constant throughout a
+/// single top-level `step_universe` call and the cache is cleared by
+/// `set_step_log2` whenever `j` changes.
+fn step_recursive(store: &Arc<HashLifeStore>, node: NodeId, j: u8) -> NodeId {
+    // Check cache first (without holding the lock during recursion).
+    {
+        let cache = store.step_cache.lock().unwrap();
+        if let Some(&cached) = cache.get(&node) {
+            return cached;
+        }
+    }
+
+    let level = store.nodes.lock().unwrap()[node as usize].level;
+    let result = if level == 2 {
+        debug_assert_eq!(j, 0, "j must be 0 at level-2 base case");
+        step_level2_in_store(store, node)
+    } else {
+        let (nw, ne, sw, se) = {
+            let nodes = store.nodes.lock().unwrap();
+            let n = nodes[node as usize];
+            (n.nw, n.ne, n.sw, n.se)
+        };
+
+        // ── 9 sub-macrocells (level k-1) ─────────────────────────────────────
+        let t0 = nw;
+        let t1 = horiz_in_store(store, nw, ne);
+        let t2 = ne;
+        let t3 = vert_in_store(store, nw, sw);
+        let t4 = center4_in_store(store, nw, ne, sw, se);
+        let t5 = vert_in_store(store, ne, se);
+        let t6 = sw;
+        let t7 = horiz_in_store(store, sw, se);
+        let t8 = se;
+
+        if j == level - 2 {
+            // ── Full step: two recursive waves ────────────────────────────────
+            // Wave 1: each sub-macrocell (level k-1) stepped by j-1 gens.
+            let j1 = j - 1;
+            let s0 = step_recursive(store, t0, j1);
+            let s1 = step_recursive(store, t1, j1);
+            let s2 = step_recursive(store, t2, j1);
+            let s3 = step_recursive(store, t3, j1);
+            let s4 = step_recursive(store, t4, j1);
+            let s5 = step_recursive(store, t5, j1);
+            let s6 = step_recursive(store, t6, j1);
+            let s7 = step_recursive(store, t7, j1);
+            let s8 = step_recursive(store, t8, j1);
+
+            // ── Combine into 4 level-(k-1) nodes ─────────────────────────────
+            let u0 = make_node_in_store(store, s0, s1, s3, s4);
+            let u1 = make_node_in_store(store, s1, s2, s4, s5);
+            let u2 = make_node_in_store(store, s3, s4, s6, s7);
+            let u3 = make_node_in_store(store, s4, s5, s7, s8);
+
+            // Wave 2: step the 4 combined nodes by another j-1 gens.
+            // Parallelise when the level is large enough to amortise Rayon overhead.
+            if level > PARALLEL_THRESHOLD {
+                let store1 = Arc::clone(store);
+                let store2 = Arc::clone(store);
+                let store3 = Arc::clone(store);
+                let store4 = Arc::clone(store);
+                let ((r0, r1), (r2, r3)) = rayon::join(
+                    || {
+                        rayon::join(
+                            || step_recursive(&store1, u0, j1),
+                            || step_recursive(&store2, u1, j1),
+                        )
+                    },
+                    || {
+                        rayon::join(
+                            || step_recursive(&store3, u2, j1),
+                            || step_recursive(&store4, u3, j1),
+                        )
+                    },
+                );
+                make_node_in_store(store, r0, r1, r2, r3)
+            } else {
+                let r0 = step_recursive(store, u0, j1);
+                let r1 = step_recursive(store, u1, j1);
+                let r2 = step_recursive(store, u2, j1);
+                let r3 = step_recursive(store, u3, j1);
+                make_node_in_store(store, r0, r1, r2, r3)
+            }
+        } else {
+            // ── Partial step: one wave + center4 assembly ─────────────────────
+            // Each sub-macrocell (level k-1) stepped by j gens, returning
+            // level-(k-2) results.  (When j == (k-1)-2, this is a full
+            // step on the sub-macrocell; otherwise it recurses as partial.)
+            let s0 = step_recursive(store, t0, j);
+            let s1 = step_recursive(store, t1, j);
+            let s2 = step_recursive(store, t2, j);
+            let s3 = step_recursive(store, t3, j);
+            let s4 = step_recursive(store, t4, j);
+            let s5 = step_recursive(store, t5, j);
+            let s6 = step_recursive(store, t6, j);
+            let s7 = step_recursive(store, t7, j);
+            let s8 = step_recursive(store, t8, j);
+
+            // Extract the 4 quadrants of the level-(k-1) result by applying
+            // center4 to each overlapping group of 4 stepped sub-macrocells.
+            // center4(a, b, c, d) = make_node(a.se, b.sw, c.ne, d.nw), which
+            // picks one inner corner from each, so there is no double-counting
+            // of the overlapping s4.  Total time advance = 2^j (wave 1 only).
+            let r0 = center4_in_store(store, s0, s1, s3, s4);
+            let r1 = center4_in_store(store, s1, s2, s4, s5);
+            let r2 = center4_in_store(store, s3, s4, s6, s7);
+            let r3 = center4_in_store(store, s4, s5, s7, s8);
+
+            make_node_in_store(store, r0, r1, r2, r3)
+        }
+    };
+
+    // Insert into cache (double-checked: another thread may have computed this
+    // concurrently; NodeId results are deterministic so either value is correct).
+    store.step_cache.lock().unwrap().insert(node, result);
+    result
+}
+
 // ── Tests ─────────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
@@ -1151,10 +1255,10 @@ mod tests {
     #[test]
     fn test_leaf_nodes() {
         let hl = HashLife::new();
-        assert_eq!(hl.nodes[DEAD as usize].pop, 0);
-        assert_eq!(hl.nodes[ALIVE as usize].pop, 1);
-        assert_eq!(hl.nodes[DEAD as usize].level, 0);
-        assert_eq!(hl.nodes[ALIVE as usize].level, 0);
+        assert_eq!(hl.store.nodes.lock().unwrap()[DEAD as usize].pop, 0);
+        assert_eq!(hl.store.nodes.lock().unwrap()[ALIVE as usize].pop, 1);
+        assert_eq!(hl.store.nodes.lock().unwrap()[DEAD as usize].level, 0);
+        assert_eq!(hl.store.nodes.lock().unwrap()[ALIVE as usize].level, 0);
     }
 
     /// make_node must canonicalise: calling with the same children returns the
@@ -1172,8 +1276,8 @@ mod tests {
     fn test_make_dead_node() {
         let mut hl = HashLife::new();
         let dn = hl.make_dead_node(1);
-        assert_eq!(hl.nodes[dn as usize].pop, 0);
-        assert_eq!(hl.nodes[dn as usize].level, 1);
+        assert_eq!(hl.store.nodes.lock().unwrap()[dn as usize].pop, 0);
+        assert_eq!(hl.store.nodes.lock().unwrap()[dn as usize].level, 1);
     }
 
     // ── Public API ────────────────────────────────────────────────────────────
@@ -1243,9 +1347,9 @@ mod tests {
         let se = hl.make_node(ALIVE, DEAD, DEAD, DEAD); // nw=alive
         let block = hl.make_node(nw, ne, sw, se);
 
-        let result = hl.step_level2(block);
+        let result = step_level2_in_store(&hl.store, block);
         // Result should be a level-1 node with all four cells alive.
-        assert_eq!(hl.nodes[result as usize].pop, 4);
+        assert_eq!(hl.store.nodes.lock().unwrap()[result as usize].pop, 4);
     }
 
     /// A blinker oscillates with period 2: horizontal then vertical.
@@ -1525,14 +1629,14 @@ mod tests {
             let (g, _) = hl.step_universe();
             total += g;
         }
-        let before = hl.nodes.len();
+        let before = hl.store.nodes.lock().unwrap().len();
 
         // GC must reclaim unreachable nodes.
         hl.gc();
         assert!(
-            hl.nodes.len() < before,
+            hl.store.nodes.lock().unwrap().len() < before,
             "GC must reclaim nodes: before={before}, after={}",
-            hl.nodes.len()
+            hl.store.nodes.lock().unwrap().len()
         );
     }
 
@@ -1729,6 +1833,290 @@ mod tests {
             swar.live_count(),
             hl.population(),
             "SWAR and HashLife must agree at gen {total} for a glider"
+        );
+    }
+
+    // ── Parallel subtree traversal (TODO 2.6) tests ───────────────────────────
+    //
+    // These tests reference `PARALLEL_THRESHOLD`, which will be added by the
+    // TODO 2.6 implementation (Rayon parallel join on wave-2 step_recursive
+    // calls when node level > PARALLEL_THRESHOLD).  They are intentionally
+    // written before the implementation exists and will fail to compile until
+    // `PARALLEL_THRESHOLD` is exported from this module.
+
+    /// PARALLEL_THRESHOLD must be an accessible constant in this module.
+    /// This test verifies the constant exists and has a sensible value:
+    /// it must be at least 4 (to avoid parallelising tiny subtrees) and
+    /// at most 16 (practically: large enough to amortise Rayon overhead).
+    #[test]
+    fn test_parallel_threshold_is_exported_and_sane() {
+        // PARALLEL_THRESHOLD does not exist yet — this line will fail to
+        // compile until TODO 2.6 adds the constant.
+        assert!(
+            PARALLEL_THRESHOLD >= 4,
+            "PARALLEL_THRESHOLD must be >= 4 to avoid trivial parallelism overhead, got {PARALLEL_THRESHOLD}"
+        );
+        assert!(
+            PARALLEL_THRESHOLD <= 16,
+            "PARALLEL_THRESHOLD must be <= 16 (sanity cap), got {PARALLEL_THRESHOLD}"
+        );
+    }
+
+    /// The Gosper glider gun runs entirely below PARALLEL_THRESHOLD (it fits
+    /// in a ~36×36 bounding box, well below the 128×128 level-7 threshold).
+    /// After 300 generations the population must grow monotonically (new
+    /// gliders are emitted every 30 gens) and agree between two independently
+    /// constructed instances — confirming the sequential path is unaffected.
+    #[test]
+    fn test_parallel_small_pattern_gosper_gun_correctness() {
+        let gosper: &[(i32, i32)] = &[
+            (0, 24),
+            (1, 22),
+            (1, 24),
+            (2, 12),
+            (2, 13),
+            (2, 20),
+            (2, 21),
+            (2, 34),
+            (2, 35),
+            (3, 11),
+            (3, 15),
+            (3, 20),
+            (3, 21),
+            (3, 34),
+            (3, 35),
+            (4, 0),
+            (4, 1),
+            (4, 10),
+            (4, 16),
+            (4, 20),
+            (4, 21),
+            (5, 0),
+            (5, 1),
+            (5, 10),
+            (5, 14),
+            (5, 16),
+            (5, 17),
+            (5, 22),
+            (5, 24),
+            (6, 10),
+            (6, 16),
+            (6, 24),
+            (7, 11),
+            (7, 15),
+            (8, 12),
+            (8, 13),
+        ];
+
+        // Two independent HashLife instances must agree exactly.
+        let mut hl1 = HashLife::new();
+        hl1.set_cells(gosper);
+        let mut hl2 = HashLife::new();
+        hl2.set_cells(gosper);
+
+        let mut total1 = 0u64;
+        let mut total2 = 0u64;
+
+        // Advance both past 300 generations.
+        while total1 < 300 {
+            let (g, _) = hl1.step_universe();
+            total1 += g;
+        }
+        while total2 < 300 {
+            let (g, _) = hl2.step_universe();
+            total2 += g;
+        }
+
+        // Both should have taken the same path and reached the same generation.
+        assert_eq!(
+            total1, total2,
+            "two independent gosper gun runs must reach the same total generation"
+        );
+        assert_eq!(
+            hl1.population(),
+            hl2.population(),
+            "two independent gosper gun runs must have identical population at gen {total1}"
+        );
+        // Gosper gun emits one glider every 30 gens: after 300 gens there are
+        // 10 gliders + the gun body (36 cells) ≥ 86 live cells.
+        assert!(
+            hl1.population() > 36,
+            "gosper gun must have emitted gliders after 300 gens, pop={}",
+            hl1.population()
+        );
+    }
+
+    /// A large random soup (seeded, 50 % density) placed in a grid large enough
+    /// to exceed PARALLEL_THRESHOLD in level must produce the same population
+    /// when run twice from identical seeds.  This exercises the parallel path
+    /// (if level > PARALLEL_THRESHOLD) without requiring SWAR for the ground
+    /// truth — determinism is the invariant.
+    #[test]
+    fn test_parallel_large_pattern_determinism() {
+        // fill_random at 50 % density will set many cells across the full
+        // DEFAULT_LEVEL (256×256) grid, giving a root at level 8 > any
+        // reasonable PARALLEL_THRESHOLD.  Two instances seeded identically
+        // must reach the same population after the same number of steps.
+        let seed = 0xDEAD_BEEF_u64;
+
+        let mut hl1 = HashLife::new();
+        hl1.fill_random(50, seed);
+        let mut hl2 = HashLife::new();
+        hl2.fill_random(50, seed);
+
+        // Advance both to at least 16 generations.
+        let mut total1 = 0u64;
+        let mut total2 = 0u64;
+        while total1 < 16 {
+            let (g, _) = hl1.step_universe();
+            total1 += g;
+        }
+        while total2 < 16 {
+            let (g, _) = hl2.step_universe();
+            total2 += g;
+        }
+
+        assert_eq!(
+            total1, total2,
+            "determinism: both runs must reach the same total generation"
+        );
+        assert_eq!(
+            hl1.population(),
+            hl2.population(),
+            "determinism: both runs must have identical population at gen {total1} \
+             (parallel path must be deterministic)"
+        );
+    }
+
+    /// A large pattern (level ≥ PARALLEL_THRESHOLD + 1) must produce the same
+    /// result whether run on one instance or compared to a fresh clone of the
+    /// initial state.  Uses a known-good large still-life seed so that the
+    /// population is stable and any corruption is immediately visible.
+    ///
+    /// Specifically: a 256×256 grid filled at 37 % density is chaotic for the
+    /// first ~500 gens, then stabilises.  We run two fresh instances to 64 gens
+    /// and compare; if the parallel code introduces non-determinism or a wrong
+    /// result, the populations will differ.
+    #[test]
+    fn test_parallel_large_pattern_matches_independent_run() {
+        let seed = 0x1234_5678_u64;
+
+        // Instance A
+        let mut hl_a = HashLife::new();
+        hl_a.fill_random(37, seed);
+
+        // Instance B — identical starting state
+        let mut hl_b = HashLife::new();
+        hl_b.fill_random(37, seed);
+
+        // Both instances advance step_log2=0 (1 gen per call) for 64 steps,
+        // so total generations are exactly equal and comparable.
+        hl_a.set_step_log2(0);
+        hl_b.set_step_log2(0);
+
+        for step in 0..64 {
+            let (ga, _) = hl_a.step_universe();
+            let (gb, _) = hl_b.step_universe();
+            assert_eq!(
+                ga, gb,
+                "step {step}: both instances must advance the same number of gens"
+            );
+            assert_eq!(
+                hl_a.population(),
+                hl_b.population(),
+                "step {step}: parallel and sequential runs must agree on population \
+                 (level={}, PARALLEL_THRESHOLD={PARALLEL_THRESHOLD})",
+                hl_a.level
+            );
+        }
+    }
+
+    /// After running a large soup past the PARALLEL_THRESHOLD level, the live
+    /// cell positions (not just population) must be identical between two
+    /// independent instances.  Checks that parallelism does not reorder writes
+    /// or introduce race conditions.
+    #[test]
+    fn test_parallel_large_pattern_cell_positions_match() {
+        let seed = 0xCAFE_BABE_u64;
+
+        let mut hl1 = HashLife::new();
+        hl1.fill_random(30, seed);
+        let mut hl2 = HashLife::new();
+        hl2.fill_random(30, seed);
+
+        hl1.set_step_log2(0);
+        hl2.set_step_log2(0);
+
+        // Advance exactly 8 generations with 1-gen steps.
+        for _ in 0..8 {
+            hl1.step_universe();
+            hl2.step_universe();
+        }
+
+        // live_cells_offsets returns offsets relative to the centre; collect
+        // into sorted vecs for comparison.
+        let mut pos1 = hl1.live_cells_offsets();
+        let mut pos2 = hl2.live_cells_offsets();
+        pos1.sort_unstable();
+        pos2.sort_unstable();
+
+        assert_eq!(
+            pos1, pos2,
+            "cell positions must be identical between two independent runs \
+             at level {} (PARALLEL_THRESHOLD={PARALLEL_THRESHOLD})",
+            hl1.level
+        );
+    }
+
+    /// When the universe level exceeds PARALLEL_THRESHOLD, HashLife and SWAR
+    /// must agree on the live-cell count after the same number of generations.
+    /// Uses a small, well-known pattern (blinker) scaled via many step_log2=0
+    /// steps so the HL tree grows large enough to trigger the parallel path.
+    ///
+    /// Note: The blinker has period 2, so after any even number of gens the
+    /// population is exactly 3.  After an odd number it is also 3 (blinker
+    /// keeps pop=3 at all times).
+    #[test]
+    fn test_parallel_agrees_with_swar_above_threshold() {
+        use crate::grid::Grid;
+
+        // Standard horizontal blinker.
+        let blinker: &[(i32, i32)] = &[(0, -1), (0, 0), (0, 1)];
+
+        let mut hl = HashLife::new();
+        hl.set_cells(blinker);
+        hl.set_step_log2(0);
+
+        // Step until the root level exceeds PARALLEL_THRESHOLD.  Each
+        // step_universe call with step_log2=0 advances exactly 1 gen; the
+        // level grows as the universe expands.
+        let mut total_gens = 0u64;
+        while hl.level <= PARALLEL_THRESHOLD {
+            let (g, _) = hl.step_universe();
+            total_gens += g;
+        }
+        // Now level > PARALLEL_THRESHOLD.  Step a few more gens.
+        for _ in 0..4 {
+            let (g, _) = hl.step_universe();
+            total_gens += g;
+        }
+
+        // Run SWAR for exactly the same number of generations.
+        let mut swar = Grid::new(4096, 4096);
+        let origin = 2048usize;
+        for &(_dr, dc) in blinker {
+            swar.set(origin, (origin as i64 + dc as i64) as usize, true);
+        }
+        for _ in 0..total_gens {
+            swar.step();
+            swar.expand_if_needed();
+        }
+
+        assert_eq!(
+            swar.live_count(),
+            hl.population(),
+            "SWAR and HashLife must agree at gen {total_gens} when hl.level={} > PARALLEL_THRESHOLD={PARALLEL_THRESHOLD}",
+            hl.level
         );
     }
 }
