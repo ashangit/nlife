@@ -82,9 +82,9 @@ Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead r
 - `HashLife` stores the universe as a canonical quadtree; nodes are identified by `NodeId` (`u32` arena index)
 - `CanonTable` — purpose-built open-addressing intern map; 20-byte `CanonEntry {nw,ne,sw,se,id}`, linear probing, 75% load factor, FxHasher on two packed `u64` words; replaces `FxHashMap<(u32,u32,u32,u32),u32>` for better cache locality
 - `step_recursive` — 9-submacrocell algorithm advancing `2^(level−2)` gens, memoised in `step_cache: FxHashMap<NodeId,NodeId>`
-- `step_universe` expansion loop checks **two conditions** before each step:
-  1. `needs_expansion()` — all 12 outer grandchildren must be empty (cells within `[N/4, 3N/4)`)
-  2. `needs_expansion_deep()` — all 12 near-boundary great-grandchildren must also be empty (cells within `[3N/8, 5N/8)`); prevents cells near the result-window boundary from being silently dropped during the step for patterns moving at up to c/2
+- `step_universe` expansion loop checks **two conditions** before each step (both evaluated under a single `nodes` lock per iteration via `needs_expansion_inner` / `needs_expansion_deep_inner`):
+  1. `needs_expansion_inner()` — all 12 outer grandchildren must be empty (cells within `[N/4, 3N/4)`)
+  2. `needs_expansion_deep_inner()` — all 12 near-boundary great-grandchildren must also be empty (cells within `[3N/8, 5N/8)`); prevents cells near the result-window boundary from being silently dropped during the step for patterns moving at up to c/2
 - Re-centering after each step: result `(level k−1)` is split into 4 quadrants and assembled into a same-level root with dead padding, preserving absolute cell coordinates
 
 ### Pattern library (`build.rs` + `library.rs` + `rle.rs` + `src/patterns/`)
@@ -105,7 +105,7 @@ Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead r
 - `live_bbox` is expanded conservatively (never shrunk except by `clear()` or `step()`).
 - `step_4words_avx2` is `unsafe` and `#[target_feature(enable = "avx2")]`; it must only be called inside an `is_x86_feature_detected!("avx2")` runtime guard — never unconditionally.
 - `CANON_EMPTY = u32::MAX` is the `CanonTable` empty-slot sentinel; `NodeId` `u32::MAX` is never a valid node index.
-- `needs_expansion_deep()` must be checked alongside `needs_expansion()` in `step_universe`'s expansion loop; omitting it allows cells near the result-window boundary to be silently dropped for expanding patterns (e.g. cordership guns).
+- `needs_expansion_deep_inner()` must be checked alongside `needs_expansion_inner()` in `step_universe`'s expansion loop; omitting it allows cells near the result-window boundary to be silently dropped for expanding patterns (e.g. cordership guns).
 
 ## Documentation
 
