@@ -241,7 +241,7 @@ pub(crate) const PARALLEL_THRESHOLD: u8 = 6;
 /// Shared mutable state for a HashLife instance, protected behind `Mutex` locks
 /// so that parallel Rayon tasks spawned by `step_recursive` can safely share access.
 ///
-/// Lock ordering (when acquiring both): `canon` before `nodes`.
+/// Lock ordering (when acquiring both): `nodes` before `canon` before `step_cache`.
 struct HashLifeStore {
     /// Arena of all interned nodes; `nodes[0]` = DEAD, `nodes[1]` = ALIVE.
     nodes: Mutex<Vec<Node>>,
@@ -956,8 +956,8 @@ impl HashLife {
 
 /// Canonicalises a level-k node by interning it in the store's `canon`.
 ///
-/// Lock ordering: `canon` first (to check/insert), then `nodes` (to push new entry).
-/// Both locks are released between operations to avoid deadlock.
+/// Lock ordering: `nodes` first (to push the new entry), then `canon` (to insert the key).
+/// Both locks are released between the fast-path check and the slow-path insertion.
 fn make_node_in_store(
     store: &HashLifeStore,
     nw: NodeId,
