@@ -281,6 +281,17 @@ impl Simulation {
         }
     }
 
+    /// Runs a HashLife garbage-collection pass if the node store exceeds
+    /// `GC_THRESHOLD`.  This is a no-op for the SWAR engine.  Intended to be
+    /// called once per frame during idle time so that GC does not stall a step.
+    pub(crate) fn maybe_gc(&mut self) {
+        if let Engine::HashLife(hl) = &mut self.engine
+            && hl.needs_gc()
+        {
+            hl.gc();
+        }
+    }
+
     /// Advances the simulation by as many steps as `dt` seconds warrant at the
     /// current speed.
     ///

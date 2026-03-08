@@ -242,6 +242,7 @@ impl eframe::App for GameOfLifeApp {
             ctx.request_repaint();
         }
         self.advance_simulation(ctx);
+        self.sim.maybe_gc();
         crate::ui::draw_top_panel(self, ctx);
         crate::ui::draw_pattern_browser(self, ctx);
 

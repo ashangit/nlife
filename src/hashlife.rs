@@ -533,10 +533,6 @@ impl HashLife {
     /// `expansion_per_side` is the number of cells added to each of the four
     /// sides due to `expand_root` calls (used for camera scroll compensation).
     pub(crate) fn step_universe(&mut self) -> (u64, usize) {
-        if self.store.nodes.lock().unwrap().len() > GC_THRESHOLD {
-            self.gc();
-        }
-
         let mut expansion: usize = 0;
 
         // Ensure at least MIN_STEP_LEVEL (and enough room for the requested
@@ -627,6 +623,15 @@ impl HashLife {
 
     // ── Garbage collection ────────────────────────────────────────────────────
 
+    /// Returns `true` when the node store has grown beyond `GC_THRESHOLD` and
+    /// a garbage-collection pass should be performed.
+    ///
+    /// Acquires the `nodes` lock only once, keeping the check cheap enough to
+    /// call every frame.
+    pub(crate) fn needs_gc(&self) -> bool {
+        self.store.nodes.lock().unwrap().len() > GC_THRESHOLD
+    }
+
     /// Collects unreachable nodes from the arena, compacting it.
     ///
     /// Performs a mark-sweep-compact cycle:
@@ -640,7 +645,7 @@ impl HashLife {
     /// 5. **Remap step_cache** — keep only entries where both the source node
     ///    and the result node survived; translate IDs through `remap`.
     /// 6. **Commit** — update `self.root`, replace `self.nodes`.
-    fn gc(&mut self) {
+    pub(crate) fn gc(&mut self) {
         // Lock all three stores for the duration of GC to prevent concurrent access.
         let mut nodes = self.store.nodes.lock().unwrap();
         let mut canon = self.store.canon.lock().unwrap();
@@ -2129,6 +2134,140 @@ mod tests {
             hl.population(),
             "SWAR and HashLife must agree at gen {total_gens} when hl.level={} > PARALLEL_THRESHOLD={PARALLEL_THRESHOLD}",
             hl.level
+        );
+    }
+
+    // ── needs_gc tests ────────────────────────────────────────────────────────
+
+    /// A freshly constructed HashLife has far fewer nodes than GC_THRESHOLD, so
+    /// `needs_gc` must return `false`.
+    #[test]
+    fn test_needs_gc_below_threshold() {
+        let hl = HashLife::new();
+        assert!(
+            !hl.needs_gc(),
+            "fresh HashLife should not need GC (nodes={})",
+            hl.store.nodes.lock().unwrap().len()
+        );
+    }
+
+    /// When the node store is artificially filled beyond GC_THRESHOLD,
+    /// `needs_gc` must return `true`.
+    #[test]
+    fn test_needs_gc_above_threshold() {
+        let mut hl = HashLife::new();
+        // Push dummy leaf-like nodes until the store exceeds the threshold.
+        // We reuse DEAD's fields — the content does not matter for this test,
+        // only the arena length.
+        let dummy = hl.store.nodes.lock().unwrap()[DEAD as usize].clone();
+        {
+            let mut nodes = hl.store.nodes.lock().unwrap();
+            let current_len = nodes.len();
+            let target = GC_THRESHOLD + 1;
+            nodes.reserve(target.saturating_sub(current_len));
+            while nodes.len() <= GC_THRESHOLD {
+                nodes.push(dummy.clone());
+            }
+        }
+        assert!(
+            hl.needs_gc(),
+            "needs_gc must return true when node count exceeds GC_THRESHOLD"
+        );
+    }
+
+    // ── maybe_gc (via Simulation) test ────────────────────────────────────────
+
+    /// Running a Gosper-gun simulation long enough to exceed GC_THRESHOLD, then
+    /// calling `maybe_gc`, must leave the engine below the threshold and still
+    /// functional (next step does not panic and population remains non-zero).
+    #[test]
+    fn test_maybe_gc_reduces_node_count() {
+        use crate::simulation::{Engine, Simulation};
+
+        let mut sim = Simulation::new();
+        // Switch to HashLife engine.
+        sim.engine = Engine::HashLife(Box::new({
+            let mut hl = HashLife::new();
+            // Gosper glider gun.
+            let gosper: &[(i32, i32)] = &[
+                (0, 24),
+                (1, 22),
+                (1, 24),
+                (2, 12),
+                (2, 13),
+                (2, 20),
+                (2, 21),
+                (2, 34),
+                (2, 35),
+                (3, 11),
+                (3, 15),
+                (3, 20),
+                (3, 21),
+                (3, 34),
+                (3, 35),
+                (4, 0),
+                (4, 1),
+                (4, 10),
+                (4, 16),
+                (4, 20),
+                (4, 21),
+                (5, 0),
+                (5, 1),
+                (5, 10),
+                (5, 14),
+                (5, 16),
+                (5, 17),
+                (5, 22),
+                (5, 24),
+                (6, 10),
+                (6, 16),
+                (6, 24),
+                (7, 11),
+                (7, 15),
+                (8, 12),
+                (8, 13),
+            ];
+            hl.set_cells(gosper);
+            hl
+        }));
+
+        // Artificially fill the node store beyond GC_THRESHOLD so maybe_gc
+        // triggers without running billions of steps.
+        if let Engine::HashLife(hl) = &mut sim.engine {
+            let dummy = hl.store.nodes.lock().unwrap()[DEAD as usize].clone();
+            let mut nodes = hl.store.nodes.lock().unwrap();
+            while nodes.len() <= GC_THRESHOLD {
+                nodes.push(dummy.clone());
+            }
+        }
+
+        assert!(
+            matches!(&sim.engine, Engine::HashLife(hl) if hl.needs_gc()),
+            "node store must be above threshold before maybe_gc"
+        );
+
+        sim.maybe_gc();
+
+        // After GC the store must be below the threshold.
+        assert!(
+            matches!(&sim.engine, Engine::HashLife(hl) if !hl.needs_gc()),
+            "needs_gc must return false after maybe_gc"
+        );
+
+        // The engine must still be functional: one more step must not panic and
+        // population must be non-zero.
+        let (gens, _) = if let Engine::HashLife(hl) = &mut sim.engine {
+            hl.step_universe()
+        } else {
+            panic!("engine changed unexpectedly");
+        };
+        assert!(
+            gens > 0,
+            "step after GC must advance at least one generation"
+        );
+        assert!(
+            matches!(&sim.engine, Engine::HashLife(hl) if hl.population() > 0),
+            "population must be non-zero after step following GC"
         );
     }
 }
