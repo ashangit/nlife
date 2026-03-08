@@ -81,7 +81,7 @@ Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead r
 
 - `HashLife` stores the universe as a canonical quadtree; nodes are identified by `NodeId` (`u32` arena index)
 - `CanonTable` — purpose-built open-addressing intern map; 20-byte `CanonEntry {nw,ne,sw,se,id}`, linear probing, 75% load factor, FxHasher on two packed `u64` words; replaces `FxHashMap<(u32,u32,u32,u32),u32>` for better cache locality
-- `step_recursive` — 9-submacrocell algorithm advancing `2^(level−2)` gens, memoised in `step_cache: FxHashMap<NodeId,NodeId>`
+- `step_recursive` — 9-submacrocell algorithm advancing `2^(level−2)` gens, memoised in `step_cache: DashMap<NodeId,NodeId>` (lock-free via sharding)
 - `step_universe` expansion loop checks **two conditions** before each step (both evaluated under a single `nodes` lock per iteration via `needs_expansion_inner` / `needs_expansion_deep_inner`):
   1. `needs_expansion_inner()` — all 12 outer grandchildren must be empty (cells within `[N/4, 3N/4)`)
   2. `needs_expansion_deep_inner()` — all 12 near-boundary great-grandchildren must also be empty (cells within `[3N/8, 5N/8)`); prevents cells near the result-window boundary from being silently dropped during the step for patterns moving at up to c/2

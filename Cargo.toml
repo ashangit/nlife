@@ -8,6 +8,7 @@ eframe = { version = "0.33", default-features = false, features = [
     "default_fonts", "wgpu", "wayland",
 ] }
 egui  = "0.33"
+dashmap = "6"
 rayon = "1"
 rfd = "0.17"
 rustc-hash = "2"
