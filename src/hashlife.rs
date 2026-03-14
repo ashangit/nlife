@@ -19,6 +19,13 @@ pub(crate) type NodeId = u32;
 /// Sentinel value for an empty slot in [`CanonTable`].
 const CANON_EMPTY: u32 = u32::MAX;
 
+/// Minimum table capacity (slots) at which the AVX2 4-wide probe path is used.
+///
+/// Below this threshold the table fits in a few cache lines and the scalar path
+/// is faster (no gather overhead).  32 slots = 640 bytes, well above one cache
+/// line but small enough that linear probing is essentially branch-free.
+const CANON_AVX2_THRESHOLD: usize = 32;
+
 /// A single slot in the open-addressing intern table.
 ///
 /// All five fields are packed contiguously (20 bytes), so sequential
@@ -73,9 +80,9 @@ impl CanonTable {
     }
 
     /// Looks up `(nw, ne, sw, se)` and returns the interned `NodeId`, or
-    /// `None` if not present.
+    /// `None` if not present (scalar fallback path).
     #[inline]
-    fn get(&self, nw: u32, ne: u32, sw: u32, se: u32) -> Option<u32> {
+    fn get_scalar(&self, nw: u32, ne: u32, sw: u32, se: u32) -> Option<u32> {
         let mut slot = self.hash_slot(nw, ne, sw, se);
         loop {
             let e = self.entries[slot];
@@ -87,6 +94,141 @@ impl CanonTable {
             }
             slot = (slot + 1) & self.mask;
         }
+    }
+
+    /// AVX2 4-wide probe path.  Probes 4 consecutive slots per iteration using
+    /// 256-bit SIMD comparisons, which amortises the per-slot branch overhead.
+    ///
+    /// # Safety
+    /// Must only be called when AVX2 is available at runtime (guarded by
+    /// `is_x86_feature_detected!("avx2")` in the public `get` dispatcher).
+    #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+    #[target_feature(enable = "avx2")]
+    unsafe fn get_avx2(&self, nw: u32, ne: u32, sw: u32, se: u32) -> Option<u32> {
+        use std::arch::x86_64::*;
+        let mask = self.entries.len() - 1;
+        let slot = self.hash_slot(nw, ne, sw, se);
+        // Build key broadcast vectors once outside the loop.
+        let key_nw = _mm256_set1_epi32(nw as i32);
+        let key_ne = _mm256_set1_epi32(ne as i32);
+        let key_sw = _mm256_set1_epi32(sw as i32);
+        let key_se = _mm256_set1_epi32(se as i32);
+        let empty_vec = _mm256_set1_epi32(CANON_EMPTY as i32);
+        let mut i = 0usize;
+        while i < self.entries.len() {
+            // Load four entries via scalar gather (the table is not 32-byte aligned
+            // so we cannot use _mm256_load_si256 safely on arbitrary allocations).
+            let e0 = self.entries[(slot + i) & mask];
+            let e1 = self.entries[(slot + i + 1) & mask];
+            let e2 = self.entries[(slot + i + 2) & mask];
+            let e3 = self.entries[(slot + i + 3) & mask];
+            // _mm256_set_epi32 fills lanes from high (arg0) to low (arg7).
+            // We use the low 4 lanes (args 4-7) and zero the upper 4.
+            let nw_vec = _mm256_set_epi32(
+                0,
+                0,
+                0,
+                0,
+                e3.nw as i32,
+                e2.nw as i32,
+                e1.nw as i32,
+                e0.nw as i32,
+            );
+            let ne_vec = _mm256_set_epi32(
+                0,
+                0,
+                0,
+                0,
+                e3.ne as i32,
+                e2.ne as i32,
+                e1.ne as i32,
+                e0.ne as i32,
+            );
+            let sw_vec = _mm256_set_epi32(
+                0,
+                0,
+                0,
+                0,
+                e3.sw as i32,
+                e2.sw as i32,
+                e1.sw as i32,
+                e0.sw as i32,
+            );
+            let se_vec = _mm256_set_epi32(
+                0,
+                0,
+                0,
+                0,
+                e3.se as i32,
+                e2.se as i32,
+                e1.se as i32,
+                e0.se as i32,
+            );
+            let id_vec = _mm256_set_epi32(
+                0,
+                0,
+                0,
+                0,
+                e3.id as i32,
+                e2.id as i32,
+                e1.id as i32,
+                e0.id as i32,
+            );
+            // Detect empty slots: id == CANON_EMPTY.
+            // _mm256_movemask_epi8 produces 1 bit per byte; each i32 lane spans 4 bytes,
+            // so the low 4 lanes produce bits [0..16).  Mask to those 16 bits.
+            let empty_cmp = _mm256_cmpeq_epi32(id_vec, empty_vec);
+            let empty_bits = _mm256_movemask_epi8(empty_cmp) & 0xFFFF;
+            // Full match: all four key fields agree AND the slot is occupied.
+            // We exclude empty slots by ANDing with the NOT of empty_cmp, so that
+            // zero-initialised key fields in vacant slots never produce a false hit
+            // when searching for (0, 0, 0, 0).
+            let key_match = _mm256_and_si256(
+                _mm256_and_si256(
+                    _mm256_cmpeq_epi32(nw_vec, key_nw),
+                    _mm256_cmpeq_epi32(ne_vec, key_ne),
+                ),
+                _mm256_and_si256(
+                    _mm256_cmpeq_epi32(sw_vec, key_sw),
+                    _mm256_cmpeq_epi32(se_vec, key_se),
+                ),
+            );
+            // Occupied = NOT empty.
+            let occupied = _mm256_andnot_si256(empty_cmp, _mm256_set1_epi32(-1));
+            let full_match = _mm256_and_si256(key_match, occupied);
+            let match_bits = _mm256_movemask_epi8(full_match) & 0xFFFF;
+            // Determine which lane fires first: whichever of (match, empty) has
+            // the lowest lane index wins.  An empty slot at lane j means the key
+            // is absent regardless of what any lane k > j might show.
+            let first_match = match_bits.trailing_zeros(); // byte offset in low 4 lanes
+            let first_empty = empty_bits.trailing_zeros(); // byte offset in low 4 lanes
+            if match_bits != 0 && first_match < first_empty {
+                let lane = (first_match / 4) as usize;
+                let id = [e0.id, e1.id, e2.id, e3.id][lane];
+                return Some(id);
+            }
+            if empty_bits != 0 {
+                return None;
+            }
+            i += 4;
+        }
+        None
+    }
+
+    /// Looks up `(nw, ne, sw, se)` and returns the interned `NodeId`, or
+    /// `None` if not present.
+    ///
+    /// Dispatches to the AVX2 4-wide probe when the hardware supports it and
+    /// the table is large enough to benefit (`≥ CANON_AVX2_THRESHOLD` slots).
+    /// Falls back to the scalar path otherwise.
+    #[inline]
+    fn get(&self, nw: u32, ne: u32, sw: u32, se: u32) -> Option<u32> {
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        if self.entries.len() >= CANON_AVX2_THRESHOLD && is_x86_feature_detected!("avx2") {
+            // SAFETY: guarded by is_x86_feature_detected!("avx2") runtime check above.
+            return unsafe { self.get_avx2(nw, ne, sw, se) };
+        }
+        self.get_scalar(nw, ne, sw, se)
     }
 
     /// Inserts `(nw, ne, sw, se) → id`.
@@ -2105,6 +2247,77 @@ mod tests {
              at level {} (PARALLEL_THRESHOLD={PARALLEL_THRESHOLD})",
             hl1.level
         );
+    }
+
+    // ── CanonTable AVX2 probe tests ───────────────────────────────────────────
+
+    /// AVX2 and scalar paths must return the same result for keys that are
+    /// present in the table.
+    #[test]
+    fn test_canon_avx2_matches_scalar_hits() {
+        let mut table = CanonTable::with_capacity(8);
+        for i in 0..50u32 {
+            table.insert(i, i + 1, i + 2, i + 3, i * 4);
+        }
+        for i in 0..50u32 {
+            let scalar = table.get_scalar(i, i + 1, i + 2, i + 3);
+            #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+            {
+                if is_x86_feature_detected!("avx2") && table.entries.len() >= CANON_AVX2_THRESHOLD {
+                    let avx2_result = unsafe { table.get_avx2(i, i + 1, i + 2, i + 3) };
+                    assert_eq!(avx2_result, scalar, "AVX2 vs scalar mismatch at i={i}");
+                }
+            }
+        }
+    }
+
+    /// AVX2 probe must return `None` for a key that was never inserted.
+    #[test]
+    fn test_canon_avx2_miss_terminates() {
+        let mut table = CanonTable::with_capacity(8);
+        // Insert enough entries so the table reaches CANON_AVX2_THRESHOLD capacity.
+        for i in 0..20u32 {
+            table.insert(i, i + 1, i + 2, i + 3, i);
+        }
+        let scalar = table.get_scalar(9999, 9999, 9999, 9999);
+        assert_eq!(scalar, None);
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        {
+            if is_x86_feature_detected!("avx2") && table.entries.len() >= CANON_AVX2_THRESHOLD {
+                let avx2_result = unsafe { table.get_avx2(9999, 9999, 9999, 9999) };
+                assert_eq!(
+                    avx2_result, None,
+                    "AVX2 probe must return None for missing key"
+                );
+            }
+        }
+    }
+
+    /// Stress test: 10 000 insertions; both dispatch paths must agree on every
+    /// lookup (hit and miss).
+    #[test]
+    fn test_canon_avx2_stress() {
+        let mut table = CanonTable::with_capacity(8);
+        let n = 10_000u32;
+        for i in 0..n {
+            table.insert(
+                i,
+                i.wrapping_add(1),
+                i.wrapping_add(2),
+                i.wrapping_add(3),
+                i,
+            );
+        }
+        for i in 0..n {
+            let scalar =
+                table.get_scalar(i, i.wrapping_add(1), i.wrapping_add(2), i.wrapping_add(3));
+            let dispatched = table.get(i, i.wrapping_add(1), i.wrapping_add(2), i.wrapping_add(3));
+            assert_eq!(scalar, dispatched, "stress mismatch at i={i}");
+            assert_eq!(scalar, Some(i), "wrong value at i={i}");
+        }
+        // Also verify a miss is consistent.
+        assert_eq!(table.get_scalar(n, n, n, n), None);
+        assert_eq!(table.get(n, n, n, n), None);
     }
 
     /// When the universe level exceeds PARALLEL_THRESHOLD, HashLife and SWAR
