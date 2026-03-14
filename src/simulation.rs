@@ -198,6 +198,28 @@ impl Simulation {
         matches!(self.engine, Engine::HashLife(_))
     }
 
+    /// Returns `true` when the active engine's node arena needs garbage
+    /// collection.
+    ///
+    /// Always returns `false` for the SWAR engine.  For HashLife, delegates
+    /// to [`HashLife::needs_gc`].
+    pub(crate) fn needs_gc(&self) -> bool {
+        match &self.engine {
+            Engine::Swar(_) => false,
+            Engine::HashLife(hl) => hl.needs_gc(),
+        }
+    }
+
+    /// Runs a garbage-collection cycle on the active engine if applicable.
+    ///
+    /// No-op for the SWAR engine.  For HashLife, calls [`HashLife::gc`] to
+    /// compact the arena and free unreachable nodes.
+    pub(crate) fn run_gc(&mut self) {
+        if let Engine::HashLife(hl) = &mut self.engine {
+            hl.gc();
+        }
+    }
+
     // ── Lifecycle methods ─────────────────────────────────────────────────────
 
     /// Loads centred cell offsets as the new grid state, resets the generation
@@ -498,6 +520,49 @@ mod tests {
         sim.pattern_name = Some("glider".to_owned());
         sim.fill_random(50);
         assert!(sim.pattern_name.is_none());
+    }
+
+    // ── GC proxy tests ────────────────────────────────────────────────────────
+
+    /// `needs_gc()` always returns `false` for the SWAR engine.
+    #[test]
+    fn test_needs_gc_false_for_swar() {
+        let sim = Simulation::new();
+        assert!(!sim.is_hashlife(), "precondition: default engine is SWAR");
+        assert!(!sim.needs_gc(), "needs_gc must always be false for SWAR");
+    }
+
+    /// `run_gc()` on the SWAR engine must not panic.
+    #[test]
+    fn test_run_gc_noop_for_swar() {
+        let mut sim = Simulation::new();
+        assert!(!sim.is_hashlife());
+        sim.run_gc(); // must not panic
+    }
+
+    /// `needs_gc()` returns `false` for a freshly created HashLife engine
+    /// (arena is tiny, well below threshold).
+    #[test]
+    fn test_needs_gc_false_for_fresh_hashlife() {
+        let mut sim = Simulation::new();
+        sim.toggle_engine();
+        assert!(sim.is_hashlife());
+        assert!(!sim.needs_gc(), "fresh HashLife engine should not need GC");
+    }
+
+    /// `run_gc()` on HashLife must not panic and must preserve population.
+    #[test]
+    fn test_run_gc_preserves_hashlife_population() {
+        let mut sim = Simulation::new();
+        sim.toggle_engine();
+        sim.load_cells(&[(0, -1), (0, 0), (0, 1)]); // blinker
+        let pop_before = sim.population();
+        sim.run_gc();
+        assert_eq!(
+            sim.population(),
+            pop_before,
+            "run_gc must not alter population"
+        );
     }
 
     /// toggle_engine() does NOT clear pattern_name.

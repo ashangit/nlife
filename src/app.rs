@@ -263,6 +263,10 @@ impl GameOfLifeApp {
     /// capping `dt` at 0.1 s to avoid a large first-frame spike.
     fn advance_simulation(&mut self, ctx: &egui::Context) {
         if !self.sim.running {
+            // Paused idle path: run GC if needed without blocking a step.
+            if self.sim.needs_gc() {
+                self.sim.run_gc();
+            }
             return;
         }
         let dt = (ctx.input(|i| i.unstable_dt) as f64).min(0.1);
@@ -272,6 +276,10 @@ impl GameOfLifeApp {
         self.pop_history.push_back(self.sim.population());
         if self.pop_history.len() > 128 {
             self.pop_history.pop_front();
+        }
+        // Running idle path: run GC once per frame after all steps complete.
+        if self.sim.needs_gc() {
+            self.sim.run_gc();
         }
         ctx.request_repaint();
     }
