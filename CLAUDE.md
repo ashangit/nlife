@@ -15,28 +15,6 @@ cargo build --release # optimised build
 cargo bench --bench step   # microbenchmarks; run before/after any performance change
 ```
 
-## Workflow
-
-- **Always plan first**: for any non-trivial change (new feature, multi-file edit, refactor)
-  use `EnterPlanMode`, design the approach, and get user approval before writing any code.
-- **Commit after every source code change**: once tests, linter, and formatter all pass,
-  create a git commit.  Do not bundle unrelated changes into a single commit.  The commit
-  message body must list every modified file with a concise explanation of what changed in
-  it and why (not just "updated X" — describe the actual change).
-- **Summarise changes**: after completing any modification, provide a summary listing every
-  modified file and a brief description of what changed in each.
-- **Benchmark after perf changes**: for any change intended as a performance improvement,
-  capture a baseline *before* making changes with
-  `cargo bench --bench step -- --save-baseline before`, implement the change, then run
-  `cargo bench --bench step -- --save-baseline after` and compare with
-  `cargo bench --bench step -- --load-baseline before --baseline after`.
-  A regression on any existing benchmark must be justified or fixed before the commit is
-  complete.  This applies to any module, not just `grid.rs`.
-- **Unit tests are mandatory**: every source code change must include corresponding test
-  updates — add new tests for new behaviour, update existing tests when behaviour changes,
-  and delete tests that cover removed functionality.  A change without an appropriate test
-  delta is incomplete.
-
 ## Architecture
 
 `newlife` is a Conway's Game of Life desktop app built with egui 0.33 / eframe 0.33 (wgpu renderer, Wayland).
@@ -81,7 +59,7 @@ Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead r
 
 - `HashLife` stores the universe as a canonical quadtree; nodes are identified by `NodeId` (`u32` arena index)
 - `CanonTable` — purpose-built open-addressing intern map; 20-byte `CanonEntry {nw,ne,sw,se,id}`, linear probing, 75% load factor, FxHasher on two packed `u64` words; replaces `FxHashMap<(u32,u32,u32,u32),u32>` for better cache locality
-- `step_recursive` — 9-submacrocell algorithm advancing `2^(level−2)` gens, memoised in `step_cache: FxHashMap<NodeId,NodeId>`
+- `step_recursive` — 9-submacrocell algorithm advancing `2^(level−2)` gens, memoised in `step_cache: DashMap<NodeId,NodeId>` (lock-free; concurrent writes are harmless — results are deterministic)
 - `step_universe` expansion loop checks **two conditions** before each step (both evaluated under a single `nodes` lock per iteration via `needs_expansion_inner` / `needs_expansion_deep_inner`):
   1. `needs_expansion_inner()` — all 12 outer grandchildren must be empty (cells within `[N/4, 3N/4)`)
   2. `needs_expansion_deep_inner()` — all 12 near-boundary great-grandchildren must also be empty (cells within `[3N/8, 5N/8)`); prevents cells near the result-window boundary from being silently dropped during the step for patterns moving at up to c/2
@@ -98,11 +76,16 @@ Auto-expand: after each step, if live cells touch any edge, `MARGIN = 20` dead r
 
 ### Key invariants to preserve
 
+**Architecture**
 - `Simulation` has no egui dependency — keep simulation logic independently testable.
 - `drag_paint_state: Option<bool>` lives on `GameOfLifeApp` (not `Grid`): set on `drag_started`, cleared on `drag_stopped`.
+
+**Storage**
 - Unused high bits in the last word of each row must always be zero (enforced by the mask in `step()` / `compute_4words()` and by `set_bit`).
 - Unused padding slots in the last partial tile (rows `height..⌈height/8⌉×8`) are always zero (allocated by `tiled_size` via `vec![0u64; n]`, never written by `set_bit`).
 - `live_bbox` is expanded conservatively (never shrunk except by `clear()` or `step()`).
+
+**Synchronisation**
 - `step_4words_avx2` is `unsafe` and `#[target_feature(enable = "avx2")]`; it must only be called inside an `is_x86_feature_detected!("avx2")` runtime guard — never unconditionally.
 - `CANON_EMPTY = u32::MAX` is the `CanonTable` empty-slot sentinel; `NodeId` `u32::MAX` is never a valid node index.
 - `needs_expansion_deep_inner()` must be checked alongside `needs_expansion_inner()` in `step_universe`'s expansion loop; omitting it allows cells near the result-window boundary to be silently dropped for expanding patterns (e.g. cordership guns).

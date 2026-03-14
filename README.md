@@ -207,7 +207,7 @@ Key components:
 | Component | Description |
 |-----------|-------------|
 | `CanonTable` | Purpose-built open-addressing intern table; 20-byte `CanonEntry` structs, linear probing, 75 % load factor, FxHasher on two packed `u64` words |
-| `step_cache: FxHashMap<NodeId, NodeId>` | Memoised `step_recursive` results; valid across `expand_root` calls |
+| `step_cache: DashMap<NodeId, NodeId>` | Memoised `step_recursive` results; lock-free concurrent reads/writes via `DashMap`; lost concurrent writes are harmless (deterministic results); valid across `expand_root` calls |
 | `step_recursive(node, j)` | 9-submacrocell algorithm; advances level-k node by `2^j` generations and returns a level-(k−1) result; `j == level−2` → full two-wave step; `j < level−2` → single-wave partial step |
 | `step_universe` | Public entry point; expands the root until `level ≥ j+2` and boundaries are clear, calls `step_recursive(root, effective_j)`, re-centres the result; `effective_j = step_log2.min(level−2)` |
 
