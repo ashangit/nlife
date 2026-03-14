@@ -6,10 +6,16 @@ const MARGIN: usize = 20;
 
 /// Minimum word-level frontier size at which Rayon parallel evaluation pays off.
 ///
-/// Below this the thread-pool wakeup cost (~37 µs measured) exceeds the
-/// parallelism gain; above it each additional word contributes ~2 ns of saved
-/// compute time per thread.  Break-even ≈ 37 000 ns / (8 ns × (1 − 1/threads))
-/// ≈ 6 200 words at 4 threads; 4 000 chosen conservatively.
+/// Sweep over [1000, 2000, 3000, 4000, 6000, 8000] on an 8-core x86_64 machine
+/// (large_soup benchmark, ~5500-word frontier):
+///   1000 → 889 µs, 2000 → 966 µs, 3000 → 914 µs, 4000 → 880 µs (best),
+///   6000 → 881 µs, 8000 → 894 µs.
+/// Re-swept over [2000, 3000, 4000, 5000, 6000, 8000] on AMD Ryzen 9 9950X3D
+/// (32 threads, x86_64), large_soup benchmark (~5500-word frontier):
+///   2000 → 921 µs, 3000 → 936 µs, 4000 → 907 µs (best), 5000 → 917 µs,
+///   6000 → 950 µs, 8000 → 923 µs.
+/// 4 000 is consistently optimal across both machines; values below incur Rayon
+/// wakeup overhead without enough parallel work to compensate.
 const RAYON_THRESHOLD: usize = 4_000;
 
 /// Number of rows per cache-line tile in the tiled storage layout.
@@ -684,7 +690,18 @@ impl Grid {
         // it enables AVX2 4-word batching (sequential path) and improves cache locality for
         // word loads (Rayon parallel path).  Tiny frontiers (blinker: ~9 words, pulsar: ~45)
         // skip the sort entirely — the overhead would exceed any benefit.
-        const AVX2_SORT_THRESHOLD: usize = 64;
+        //
+        // Sweep over [48, 56, 64, 80, 96, 128] on AVX2 x86_64 (AMD Ryzen 9 9950X3D, 32 threads),
+        // grid_step/pulsar (~45 words) and grid_step/large_soup (~5500 words):
+        //   48  → pulsar 755 ns (regression — sort triggers at 45 words), large_soup 909 µs
+        //   56  → pulsar 667 ns, large_soup 888 µs  ← best
+        //   64  → pulsar 669 ns, large_soup 907 µs
+        //   80  → pulsar 675 ns, large_soup 903 µs
+        //   96  → pulsar 674 ns, large_soup 886 µs
+        //   128 → pulsar 675 ns, large_soup 904 µs
+        // 56 is the crossover: below it the sort triggers for pulsar (~45 words) and regresses;
+        // at 56 and above pulsar skips the sort.  56 also wins on large_soup vs 64.
+        const AVX2_SORT_THRESHOLD: usize = 56;
         let frontier_sorted = self.frontier_vec.len() >= AVX2_SORT_THRESHOLD;
         if frontier_sorted {
             self.frontier_vec.sort_unstable();
