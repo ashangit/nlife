@@ -694,14 +694,17 @@ impl Grid {
         // Sweep over [48, 56, 64, 80, 96, 128] on AVX2 x86_64 (AMD Ryzen 9 9950X3D, 32 threads),
         // grid_step/pulsar (~45 words) and grid_step/large_soup (~5500 words):
         //   48  → pulsar 755 ns (regression — sort triggers at 45 words), large_soup 909 µs
-        //   56  → pulsar 667 ns, large_soup 888 µs  ← best
+        //   56  → pulsar 667 ns, large_soup 888 µs
         //   64  → pulsar 669 ns, large_soup 907 µs
         //   80  → pulsar 675 ns, large_soup 903 µs
         //   96  → pulsar 674 ns, large_soup 886 µs
         //   128 → pulsar 675 ns, large_soup 904 µs
-        // 56 is the crossover: below it the sort triggers for pulsar (~45 words) and regresses;
-        // at 56 and above pulsar skips the sort.  56 also wins on large_soup vs 64.
-        const AVX2_SORT_THRESHOLD: usize = 56;
+        // Formal before/after baseline comparison (--load-baseline before --baseline after)
+        // showed no statistically significant improvement at 56 vs 64: pulsar +0.7% slower
+        // (p=0.00 but <1 ns), large_soup +2.2% (p=0.24, noise).  48 is the only value that
+        // causes a clear regression (sort triggers for pulsar's ~45-word frontier).
+        // 64 retained as a safe margin above pulsar's frontier size.
+        const AVX2_SORT_THRESHOLD: usize = 64;
         let frontier_sorted = self.frontier_vec.len() >= AVX2_SORT_THRESHOLD;
         if frontier_sorted {
             self.frontier_vec.sort_unstable();
