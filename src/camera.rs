@@ -130,15 +130,17 @@ impl Camera {
         self.scroll_offset.x += add_left as f32 * self.cell_size;
     }
 
-    /// Shifts the viewport by `delta` logical pixels.
+    /// Pans the viewport by a pointer-drag delta in logical pixels.
     ///
-    /// Positive x moves right (scrolls content left), positive y moves down.
-    /// This is the same coordinate convention used by `scroll_offset`.
+    /// Pass the raw pointer displacement directly: when the pointer moves right,
+    /// the viewport moves right (content scrolls left), matching natural pan
+    /// behaviour.  Internally `scroll_offset` is decremented by `delta` because
+    /// `scroll_offset` tracks how far the content has been scrolled.
     ///
     /// # Arguments
-    /// * `delta` — viewport displacement in logical pixels
+    /// * `delta` — pointer movement in logical pixels (positive x = pointer moved right)
     pub(crate) fn pan_by(&mut self, delta: egui::Vec2) {
-        self.scroll_offset += delta;
+        self.scroll_offset -= delta;
     }
 
     /// Converts a canvas position to `(row, col)` grid coordinates.
@@ -177,23 +179,25 @@ mod tests {
 
     #[test]
     fn test_pan_by_positive_x() {
+        // Pointer moves right (+x): content scrolls left, so scroll_offset.x decreases.
         let mut cam = Camera::new();
         cam.pan_by(egui::Vec2::new(50.0, 0.0));
         assert_eq!(
             cam.scroll_offset,
-            egui::Vec2::new(50.0, 0.0),
-            "pan_by positive x should shift scroll_offset.x"
+            egui::Vec2::new(-50.0, 0.0),
+            "pan_by positive x (pointer right) should decrement scroll_offset.x"
         );
     }
 
     #[test]
     fn test_pan_by_negative_y() {
+        // Pointer moves up (-y): content scrolls down, so scroll_offset.y increases.
         let mut cam = Camera::new();
         cam.pan_by(egui::Vec2::new(0.0, -30.0));
         assert_eq!(
             cam.scroll_offset,
-            egui::Vec2::new(0.0, -30.0),
-            "pan_by negative y should shift scroll_offset.y negatively"
+            egui::Vec2::new(0.0, 30.0),
+            "pan_by negative y (pointer up) should increment scroll_offset.y"
         );
     }
 
@@ -204,8 +208,8 @@ mod tests {
         cam.pan_by(egui::Vec2::new(-5.0, 5.0));
         assert_eq!(
             cam.scroll_offset,
-            egui::Vec2::new(5.0, 25.0),
-            "successive pan_by calls should accumulate"
+            egui::Vec2::new(-5.0, -25.0),
+            "successive pan_by calls should accumulate (negated)"
         );
     }
 

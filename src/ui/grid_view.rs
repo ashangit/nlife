@@ -78,7 +78,7 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
         app.sim.toggle(row, col);
     }
 
-    if response.drag_started()
+    if response.drag_started_by(PointerButton::Primary)
         && let Some(pos) = response.interact_pointer_pos()
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
     {
@@ -88,7 +88,7 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
         app.sim.toggle(row, col);
     }
 
-    if response.dragged()
+    if response.dragged_by(PointerButton::Primary)
         && let (Some(pos), Some(paint_alive)) =
             (response.interact_pointer_pos(), app.drag_paint_state)
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
@@ -96,7 +96,7 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
         app.sim.set(row, col, paint_alive);
     }
 
-    if response.drag_stopped() {
+    if response.drag_stopped_by(PointerButton::Primary) {
         app.drag_paint_state = None;
     }
 
@@ -110,7 +110,7 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
         && let (Some(last), Some(current)) = (app.mid_pan_last_pos, response.interact_pointer_pos())
     {
         let delta = current - last;
-        app.camera.pan_by(-delta);
+        app.camera.pan_by(delta);
         app.mid_pan_last_pos = Some(current);
     }
 
