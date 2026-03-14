@@ -130,6 +130,17 @@ impl Camera {
         self.scroll_offset.x += add_left as f32 * self.cell_size;
     }
 
+    /// Shifts the viewport by `delta` logical pixels.
+    ///
+    /// Positive x moves right (scrolls content left), positive y moves down.
+    /// This is the same coordinate convention used by `scroll_offset`.
+    ///
+    /// # Arguments
+    /// * `delta` — viewport displacement in logical pixels
+    pub(crate) fn pan_by(&mut self, delta: egui::Vec2) {
+        self.scroll_offset += delta;
+    }
+
     /// Converts a canvas position to `(row, col)` grid coordinates.
     ///
     /// Returns `None` if the position is outside the grid bounds.
@@ -163,6 +174,52 @@ impl Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pan_by_positive_x() {
+        let mut cam = Camera::new();
+        cam.pan_by(egui::Vec2::new(50.0, 0.0));
+        assert_eq!(
+            cam.scroll_offset,
+            egui::Vec2::new(50.0, 0.0),
+            "pan_by positive x should shift scroll_offset.x"
+        );
+    }
+
+    #[test]
+    fn test_pan_by_negative_y() {
+        let mut cam = Camera::new();
+        cam.pan_by(egui::Vec2::new(0.0, -30.0));
+        assert_eq!(
+            cam.scroll_offset,
+            egui::Vec2::new(0.0, -30.0),
+            "pan_by negative y should shift scroll_offset.y negatively"
+        );
+    }
+
+    #[test]
+    fn test_pan_by_diagonal() {
+        let mut cam = Camera::new();
+        cam.pan_by(egui::Vec2::new(10.0, 20.0));
+        cam.pan_by(egui::Vec2::new(-5.0, 5.0));
+        assert_eq!(
+            cam.scroll_offset,
+            egui::Vec2::new(5.0, 25.0),
+            "successive pan_by calls should accumulate"
+        );
+    }
+
+    #[test]
+    fn test_pan_by_zero() {
+        let mut cam = Camera::new();
+        cam.scroll_offset = egui::Vec2::new(100.0, 200.0);
+        cam.pan_by(egui::Vec2::ZERO);
+        assert_eq!(
+            cam.scroll_offset,
+            egui::Vec2::new(100.0, 200.0),
+            "pan_by zero should leave scroll_offset unchanged"
+        );
+    }
 
     #[test]
     fn test_tick_zoom_converges() {
