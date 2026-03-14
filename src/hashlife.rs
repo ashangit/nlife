@@ -7,7 +7,8 @@
 //! The step advances the universe by **2^(level−2)** generations per call —
 //! an exponential speed-up for repetitive/periodic patterns.
 
-use rustc_hash::{FxHashMap, FxHasher};
+use dashmap::DashMap;
+use rustc_hash::FxHasher;
 use std::hash::Hasher;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -410,14 +411,16 @@ pub(crate) const PARALLEL_THRESHOLD: u8 = 5;
 /// Shared mutable state for a HashLife instance, protected behind `Mutex` locks
 /// so that parallel Rayon tasks spawned by `step_recursive` can safely share access.
 ///
-/// Lock ordering (when acquiring both): `nodes` before `canon` before `step_cache`.
+/// Lock ordering (when acquiring both): `nodes` before `canon`.
+/// `step_cache` uses `DashMap` (internally-sharded) and requires no external lock.
 struct HashLifeStore {
     /// Arena of all interned nodes; `nodes[0]` = DEAD, `nodes[1]` = ALIVE.
     nodes: Mutex<Vec<Node>>,
     /// Canonicalisation map: `(nw, ne, sw, se)` → `NodeId`.
     canon: Mutex<CanonTable>,
-    /// Memoisation cache for `step_recursive`.
-    step_cache: Mutex<FxHashMap<NodeId, NodeId>>,
+    /// Memoisation cache for `step_recursive`.  Lock-free concurrent reads/writes
+    /// via `DashMap`; lost concurrent writes are harmless (deterministic results).
+    step_cache: DashMap<NodeId, NodeId>,
 }
 
 /// Quadtree-memoised Game of Life engine.
@@ -471,7 +474,7 @@ impl HashLife {
         let store = Arc::new(HashLifeStore {
             nodes: Mutex::new(vec![dead_leaf, alive_leaf]),
             canon: Mutex::new(CanonTable::with_capacity(4096)),
-            step_cache: Mutex::new(FxHashMap::default()),
+            step_cache: DashMap::new(),
         });
         let mut hl = HashLife {
             store,
@@ -521,7 +524,7 @@ impl HashLife {
         let level = self.level;
         let root = self.root;
         self.root = self.set_cell_in(root, row, col, alive, level);
-        self.store.step_cache.lock().unwrap().clear();
+        self.store.step_cache.clear();
     }
 
     /// Toggles the alive/dead state of the cell at absolute `(row, col)`.
@@ -536,7 +539,7 @@ impl HashLife {
     pub(crate) fn clear(&mut self) {
         self.store.nodes.lock().unwrap().truncate(2); // keep DEAD and ALIVE leaves
         self.store.canon.lock().unwrap().clear();
-        self.store.step_cache.lock().unwrap().clear();
+        self.store.step_cache.clear();
         let root = self.make_dead_node(DEFAULT_LEVEL);
         self.root = root;
         self.level = DEFAULT_LEVEL;
@@ -567,7 +570,7 @@ impl HashLife {
                 }
             }
         }
-        self.store.step_cache.lock().unwrap().clear();
+        self.store.step_cache.clear();
     }
 
     /// Clears the grid and centres the given cell offsets, auto-sizing the
@@ -599,7 +602,7 @@ impl HashLife {
         // Reset to a fresh dead root at the required level.
         self.store.nodes.lock().unwrap().truncate(2);
         self.store.canon.lock().unwrap().clear();
-        self.store.step_cache.lock().unwrap().clear();
+        self.store.step_cache.clear();
         let root = self.make_dead_node(level);
         self.root = root;
         self.level = level;
@@ -617,7 +620,7 @@ impl HashLife {
                 self.root = self.set_cell_in(rt, row, col, true, lv);
             }
         }
-        self.store.step_cache.lock().unwrap().clear();
+        self.store.step_cache.clear();
     }
 
     /// Returns all live cells as centred `(row_offset, col_offset)` pairs.
@@ -690,7 +693,7 @@ impl HashLife {
         let j = j.min(62);
         if j != self.step_log2 {
             self.step_log2 = j;
-            self.store.step_cache.lock().unwrap().clear();
+            self.store.step_cache.clear();
         }
     }
 
@@ -810,10 +813,9 @@ impl HashLife {
     ///    and the result node survived; translate IDs through `remap`.
     /// 6. **Commit** — update `self.root`, replace `self.nodes`.
     fn gc(&mut self) {
-        // Lock all three stores for the duration of GC to prevent concurrent access.
+        // Lock nodes and canon for the duration of GC to prevent concurrent access.
         let mut nodes = self.store.nodes.lock().unwrap();
         let mut canon = self.store.canon.lock().unwrap();
-        let mut step_cache = self.store.step_cache.lock().unwrap();
 
         let n = nodes.len();
 
@@ -875,12 +877,14 @@ impl HashLife {
         }
 
         // 5. Remap step_cache: keep entries where both source and result survived.
-        let old_cache = std::mem::take(&mut *step_cache);
-        *step_cache = old_cache
-            .into_iter()
-            .filter_map(|(old_k, old_v)| {
-                let new_k = remap[old_k as usize];
-                let new_v = remap[old_v as usize];
+        // DashMap does not support in-place key mutation, so collect, clear, reinsert.
+        let remapped: Vec<(NodeId, NodeId)> = self
+            .store
+            .step_cache
+            .iter()
+            .filter_map(|entry| {
+                let new_k = remap[*entry.key() as usize];
+                let new_v = remap[*entry.value() as usize];
                 if new_k == u32::MAX || new_v == u32::MAX {
                     None
                 } else {
@@ -888,6 +892,10 @@ impl HashLife {
                 }
             })
             .collect();
+        self.store.step_cache.clear();
+        for (k, v) in remapped {
+            self.store.step_cache.insert(k, v);
+        }
 
         // 6. Commit.
         self.root = remap[self.root as usize];
@@ -1301,12 +1309,9 @@ fn step_level2_in_store(store: &HashLifeStore, node: NodeId) -> NodeId {
 /// single top-level `step_universe` call and the cache is cleared by
 /// `set_step_log2` whenever `j` changes.
 fn step_recursive(store: &Arc<HashLifeStore>, node: NodeId, j: u8) -> NodeId {
-    // Check cache first (without holding the lock during recursion).
-    {
-        let cache = store.step_cache.lock().unwrap();
-        if let Some(&cached) = cache.get(&node) {
-            return cached;
-        }
+    // Check cache first.
+    if let Some(cached) = store.step_cache.get(&node) {
+        return *cached;
     }
 
     let level = store.nodes.lock().unwrap()[node as usize].level;
@@ -1409,9 +1414,8 @@ fn step_recursive(store: &Arc<HashLifeStore>, node: NodeId, j: u8) -> NodeId {
         }
     };
 
-    // Insert into cache (double-checked: another thread may have computed this
-    // concurrently; NodeId results are deterministic so either value is correct).
-    store.step_cache.lock().unwrap().insert(node, result);
+    // Insert into cache; concurrent inserts are harmless (deterministic results).
+    store.step_cache.insert(node, result);
     result
 }
 
@@ -1818,6 +1822,46 @@ mod tests {
             hl.store.nodes.lock().unwrap().len() < before,
             "GC must reclaim nodes: before={before}, after={}",
             hl.store.nodes.lock().unwrap().len()
+        );
+    }
+
+    /// GC cache remap: after GC, the step_cache is correctly remapped so that
+    /// subsequent step_universe calls produce the same results as without GC.
+    /// Exercises the DashMap collect-clear-reinsert remap path.
+    #[test]
+    fn test_gc_step_cache_remap_correctness() {
+        let mut hl = HashLife::new();
+        // Use a blinker (period 2) so correctness is easy to verify.
+        hl.set_cells(&[(0, -1), (0, 0), (0, 1)]);
+        hl.set_step_log2(0);
+
+        // Run enough steps to warm up step_cache, then trigger GC.
+        let mut total = 0u64;
+        for _ in 0..50 {
+            let (g, _) = hl.step_universe();
+            total += g;
+        }
+        let pop_before = hl.population();
+
+        // Force GC to remap the step_cache.
+        hl.gc();
+        assert_eq!(
+            hl.population(),
+            pop_before,
+            "GC must not change population (was {pop_before})"
+        );
+
+        // Continue stepping — if the remap was wrong the cache would return
+        // stale NodeIds, producing a wrong or panicking result.
+        for _ in 0..20 {
+            let (g, _) = hl.step_universe();
+            total += g;
+        }
+        // Blinker pop is always 3 regardless of generation parity.
+        assert_eq!(
+            hl.population(),
+            3,
+            "population must stay 3 for blinker after gc+steps"
         );
     }
 
