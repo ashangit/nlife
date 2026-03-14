@@ -80,6 +80,9 @@ pub struct GameOfLifeApp {
     /// Cached `TextureHandle`s for pattern previews, keyed by pattern name.
     /// User-pattern keys are prefixed with `"user:"` to allow targeted invalidation.
     pub(crate) preview_textures: HashMap<String, egui::TextureHandle>,
+    /// Error message from the last failed drag-and-drop file load, shown as a
+    /// dismissible window at the bottom of the screen.
+    pub(crate) drop_error: Option<String>,
 }
 
 impl GameOfLifeApp {
@@ -108,6 +111,7 @@ impl GameOfLifeApp {
             browser_entries_cat: None,
             browser_entries_search: String::new(),
             preview_textures: HashMap::new(),
+            drop_error: None,
         };
         app.rebuild_browser_entries();
         app
@@ -181,6 +185,80 @@ impl GameOfLifeApp {
         self.pop_history.clear();
     }
 
+    /// Parses and loads a pattern from raw text content.
+    ///
+    /// `extension` is the file extension (e.g. `"rle"`, `"cells"`) used to select
+    /// the parser.  `stem` becomes `sim.pattern_name` on success.
+    ///
+    /// Returns `Ok(())` on success; `Err(message)` (human-readable) on failure.
+    pub(crate) fn process_dropped_file(
+        &mut self,
+        content: &str,
+        extension: Option<&str>,
+        stem: &str,
+    ) -> Result<(), String> {
+        let cells = match extension.map(|e| e.to_ascii_lowercase()).as_deref() {
+            Some("rle") => crate::rle::parse_rle(content)
+                .map(|p| p.cells)
+                .map_err(|e| format!("Failed to parse RLE: {e}")),
+            Some("cells") => {
+                crate::rle::parse_cells(content).map_err(|e| format!("Failed to parse .cells: {e}"))
+            }
+            _ => Err("Unsupported file type: only .rle and .cells are supported".to_string()),
+        }?;
+        let centred = crate::rle::center_cells(cells);
+        self.sim.load_cells(&centred);
+        self.sim.pattern_name = Some(stem.to_owned());
+        self.center_camera_on_grid();
+        Ok(())
+    }
+
+    /// Processes any files dropped onto the window this frame.
+    ///
+    /// Reads each file's content (from bytes if available, otherwise from disk),
+    /// determines the format from the file extension, and calls
+    /// [`process_dropped_file`].  On success `drop_error` is cleared; on failure
+    /// it is set to a human-readable message.  For multiple simultaneous drops the
+    /// last file wins (both for loading and for error state).
+    pub(crate) fn handle_dropped_files(&mut self, ctx: &egui::Context) {
+        let dropped = ctx.input(|i| i.raw.dropped_files.clone());
+        for file in dropped {
+            // Resolve content: egui may supply bytes directly (common on Wayland)
+            // or only a path (common on X11/Windows).
+            let content_result: Result<String, String> = if let Some(bytes) = &file.bytes {
+                std::str::from_utf8(bytes)
+                    .map(str::to_owned)
+                    .map_err(|e| format!("File is not valid UTF-8: {e}"))
+            } else if let Some(path) = &file.path {
+                std::fs::read_to_string(path).map_err(|e| format!("Could not read file: {e}"))
+            } else {
+                Err("No file content available".to_string())
+            };
+
+            match content_result {
+                Err(e) => self.drop_error = Some(e),
+                Ok(content) => {
+                    let extension = file
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.extension())
+                        .and_then(|e| e.to_str());
+                    let stem = file
+                        .path
+                        .as_ref()
+                        .and_then(|p| p.file_stem())
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("dropped")
+                        .to_owned();
+                    match self.process_dropped_file(&content, extension, &stem) {
+                        Ok(()) => self.drop_error = None,
+                        Err(e) => self.drop_error = Some(e),
+                    }
+                }
+            }
+        }
+    }
+
     /// Advances the simulation by as many steps as `dt` seconds warrant at the current speed,
     /// capping `dt` at 0.1 s to avoid a large first-frame spike.
     fn advance_simulation(&mut self, ctx: &egui::Context) {
@@ -234,6 +312,7 @@ impl GameOfLifeApp {
             browser_entries_cat: None,
             browser_entries_search: String::new(),
             preview_textures: HashMap::new(),
+            drop_error: None,
         };
         app.rebuild_browser_entries();
         app
@@ -243,6 +322,7 @@ impl GameOfLifeApp {
 impl eframe::App for GameOfLifeApp {
     /// Called every frame to update the simulation and render the UI.
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.handle_dropped_files(ctx);
         crate::input::handle_keyboard(self, ctx);
         crate::input::handle_zoom(self, ctx);
         // Advance smooth-zoom animation; request repaint while still animating.
@@ -293,6 +373,22 @@ impl eframe::App for GameOfLifeApp {
                 self.show_help = false;
             }
         }
+
+        // Drag-and-drop error toast (dismissible window anchored to bottom-centre).
+        if self.drop_error.is_some() {
+            egui::Window::new("Drop Error")
+                .resizable(false)
+                .collapsible(false)
+                .anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -20.0))
+                .show(ctx, |ui| {
+                    if let Some(msg) = &self.drop_error {
+                        ui.label(msg);
+                    }
+                    if ui.button("OK").clicked() {
+                        self.drop_error = None;
+                    }
+                });
+        }
     }
 }
 
@@ -313,5 +409,101 @@ mod tests {
     fn test_show_help_default() {
         let app = GameOfLifeApp::new_for_test();
         assert!(!app.show_help, "show_help should default to false");
+    }
+
+    #[test]
+    fn test_drop_error_default_none() {
+        let app = GameOfLifeApp::new_for_test();
+        assert!(
+            app.drop_error.is_none(),
+            "drop_error should default to None"
+        );
+    }
+
+    /// Dropping a valid glider RLE loads the pattern and leaves no error.
+    #[test]
+    fn test_drop_rle_valid() {
+        let mut app = GameOfLifeApp::new_for_test();
+        let glider_rle = "x = 3, y = 3, rule = B3/S23\nbo$2bo$3o!\n";
+        let result = app.process_dropped_file(glider_rle, Some("rle"), "glider");
+        assert!(result.is_ok(), "valid RLE should load without error");
+        assert!(
+            app.sim.population() > 0,
+            "population should be non-zero after load"
+        );
+        assert!(
+            app.drop_error.is_none(),
+            "drop_error should be None after success"
+        );
+        assert_eq!(
+            app.sim.pattern_name.as_deref(),
+            Some("glider"),
+            "pattern_name should be set from stem"
+        );
+    }
+
+    /// Dropping a valid .cells file loads the pattern and leaves no error.
+    #[test]
+    fn test_drop_cells_valid() {
+        let mut app = GameOfLifeApp::new_for_test();
+        // Simple blinker in .cells format
+        let blinker_cells = "!Name: blinker\nOOO\n";
+        let result = app.process_dropped_file(blinker_cells, Some("cells"), "blinker");
+        assert!(result.is_ok(), "valid .cells should load without error");
+        assert!(
+            app.sim.population() > 0,
+            "population should be non-zero after load"
+        );
+        assert_eq!(app.sim.pattern_name.as_deref(), Some("blinker"));
+    }
+
+    /// Dropping a file with an unsupported extension yields an error.
+    #[test]
+    fn test_drop_unsupported_ext() {
+        let mut app = GameOfLifeApp::new_for_test();
+        let result = app.process_dropped_file("some content", Some("txt"), "notes");
+        assert!(result.is_err(), "unsupported extension should return Err");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("Unsupported file type"),
+            "error message should mention 'Unsupported file type', got: {msg}"
+        );
+    }
+
+    /// Dropping a file with no extension yields an error.
+    #[test]
+    fn test_drop_no_extension() {
+        let mut app = GameOfLifeApp::new_for_test();
+        let result = app.process_dropped_file("some content", None, "noext");
+        assert!(result.is_err(), "no extension should return Err");
+    }
+
+    /// Dropping an .rle file with garbage content yields a parse error.
+    #[test]
+    fn test_drop_invalid_rle_content() {
+        let mut app = GameOfLifeApp::new_for_test();
+        let result = app.process_dropped_file("not valid rle !!!", Some("rle"), "bad");
+        assert!(result.is_err(), "invalid RLE content should return Err");
+    }
+
+    /// Dropping a .cells file with garbage content yields a parse error.
+    #[test]
+    fn test_drop_invalid_cells_content() {
+        let mut app = GameOfLifeApp::new_for_test();
+        // Content with an invalid character (not O, ., !, #, or newline)
+        let result = app.process_dropped_file("ZZZZ\n", Some("cells"), "bad");
+        assert!(result.is_err(), "invalid .cells content should return Err");
+    }
+
+    /// process_dropped_file with .rle extension is case-insensitive.
+    #[test]
+    fn test_drop_rle_extension_case_insensitive() {
+        let mut app = GameOfLifeApp::new_for_test();
+        let glider_rle = "x = 3, y = 3\nbo$2bo$3o!\n";
+        let result = app.process_dropped_file(glider_rle, Some("RLE"), "glider");
+        assert!(
+            result.is_ok(),
+            ".RLE uppercase extension should be accepted"
+        );
     }
 }
