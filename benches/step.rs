@@ -347,5 +347,71 @@ fn bench_hashlife(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_grid_step, bench_grid_expand, bench_hashlife);
+// ── Benchmark group: CanonTable probe throughput ──────────────────────────────
+
+/// Benchmark `CanonTable` probe throughput by measuring `HashLife::step_universe`
+/// on a warm-cache random soup where canonicalisation (node interning via
+/// `CanonTable::get`) dominates.
+///
+/// Two sub-benchmarks isolate different table regimes:
+///   * `canon_probe_warm_small` — Gosper gun: small pattern, small table, hot L1 cache.
+///   * `canon_probe_warm_large` — random soup: large table, L2/L3 pressure; exercises
+///     the AVX2 4-wide probe path (table ≥ CANON_AVX2_THRESHOLD slots).
+fn bench_canon_probe(c: &mut Criterion) {
+    let mut group = c.benchmark_group("canon_probe");
+    group.measurement_time(Duration::from_secs(5));
+    group.sample_size(50);
+
+    // ── canon_probe_warm_small ────────────────────────────────────────────────
+    // Gosper gun: small periodic pattern, CanonTable stays tiny and hot in L1.
+    // Represents the scalar probe path (table may be below CANON_AVX2_THRESHOLD).
+    group.bench_function("canon_probe_warm_small", |b| {
+        b.iter_batched(
+            || {
+                let mut hl = make_hashlife(GOSPER_GUN_RLE);
+                // Three warmup calls saturate the canon table with recurring nodes.
+                for _ in 0..3 {
+                    hl.step_universe();
+                }
+                hl
+            },
+            |mut hl| {
+                hl.step_universe();
+                black_box(());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    // ── canon_probe_warm_large ────────────────────────────────────────────────
+    // 256×256 random soup (20 % density, warm cache after 1 priming step).
+    // The CanonTable grows large enough to exercise the AVX2 4-wide probe path.
+    group.measurement_time(Duration::from_secs(10));
+    group.sample_size(20);
+    group.bench_function("canon_probe_warm_large", |b| {
+        b.iter_batched(
+            || {
+                let mut hl = make_random_hashlife(20, 0xDEAD_BEEF_1234_5678);
+                // One priming step populates the canon table for subsequent probes.
+                hl.step_universe();
+                hl
+            },
+            |mut hl| {
+                hl.step_universe();
+                black_box(());
+            },
+            BatchSize::SmallInput,
+        );
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_grid_step,
+    bench_grid_expand,
+    bench_hashlife,
+    bench_canon_probe
+);
 criterion_main!(benches);
