@@ -130,6 +130,19 @@ impl Camera {
         self.scroll_offset.x += add_left as f32 * self.cell_size;
     }
 
+    /// Pans the viewport by a pointer-drag delta in logical pixels.
+    ///
+    /// Pass the raw pointer displacement directly: when the pointer moves right,
+    /// the viewport moves right (content scrolls left), matching natural pan
+    /// behaviour.  Internally `scroll_offset` is decremented by `delta` because
+    /// `scroll_offset` tracks how far the content has been scrolled.
+    ///
+    /// # Arguments
+    /// * `delta` — pointer movement in logical pixels (positive x = pointer moved right)
+    pub(crate) fn pan_by(&mut self, delta: egui::Vec2) {
+        self.scroll_offset -= delta;
+    }
+
     /// Converts a canvas position to `(row, col)` grid coordinates.
     ///
     /// Returns `None` if the position is outside the grid bounds.
@@ -163,6 +176,54 @@ impl Camera {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_pan_by_positive_x() {
+        // Pointer moves right (+x): content scrolls left, so scroll_offset.x decreases.
+        let mut cam = Camera::new();
+        cam.pan_by(egui::Vec2::new(50.0, 0.0));
+        assert_eq!(
+            cam.scroll_offset,
+            egui::Vec2::new(-50.0, 0.0),
+            "pan_by positive x (pointer right) should decrement scroll_offset.x"
+        );
+    }
+
+    #[test]
+    fn test_pan_by_negative_y() {
+        // Pointer moves up (-y): content scrolls down, so scroll_offset.y increases.
+        let mut cam = Camera::new();
+        cam.pan_by(egui::Vec2::new(0.0, -30.0));
+        assert_eq!(
+            cam.scroll_offset,
+            egui::Vec2::new(0.0, 30.0),
+            "pan_by negative y (pointer up) should increment scroll_offset.y"
+        );
+    }
+
+    #[test]
+    fn test_pan_by_diagonal() {
+        let mut cam = Camera::new();
+        cam.pan_by(egui::Vec2::new(10.0, 20.0));
+        cam.pan_by(egui::Vec2::new(-5.0, 5.0));
+        assert_eq!(
+            cam.scroll_offset,
+            egui::Vec2::new(-5.0, -25.0),
+            "successive pan_by calls should accumulate (negated)"
+        );
+    }
+
+    #[test]
+    fn test_pan_by_zero() {
+        let mut cam = Camera::new();
+        cam.scroll_offset = egui::Vec2::new(100.0, 200.0);
+        cam.pan_by(egui::Vec2::ZERO);
+        assert_eq!(
+            cam.scroll_offset,
+            egui::Vec2::new(100.0, 200.0),
+            "pan_by zero should leave scroll_offset unchanged"
+        );
+    }
 
     #[test]
     fn test_tick_zoom_converges() {

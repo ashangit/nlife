@@ -22,6 +22,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("0", "Reset zoom to 100 %"),
     ("F1", "Show / hide this cheat-sheet"),
     ("Ctrl+scroll", "Zoom in / out"),
+    ("Middle-drag", "Pan viewport"),
 ];
 
 /// An entry in the filtered, unified browser list.
@@ -60,6 +61,11 @@ pub struct GameOfLifeApp {
     pub(crate) show_help: bool,
     /// Whether grid lines are currently shown on the canvas.
     pub(crate) show_grid_lines: bool,
+    /// Screen-space position of the pointer at the last middle-button pan event.
+    ///
+    /// `Some(pos)` while a middle-button drag is in progress; `None` otherwise.
+    /// Used to compute the per-frame delta for `camera.pan_by()`.
+    pub(crate) mid_pan_last_pos: Option<egui::Pos2>,
     /// Whether the "Save Pattern…" inline name popup is currently open.
     pub(crate) save_popup_open: bool,
     /// Text field value for the in-progress save-pattern name.
@@ -88,6 +94,7 @@ impl GameOfLifeApp {
             sim: Simulation::new(),
             camera: Camera::new(),
             drag_paint_state: None,
+            mid_pan_last_pos: None,
             browser_category: None,
             browser_search: String::new(),
             user_patterns,
@@ -213,6 +220,7 @@ impl GameOfLifeApp {
             sim: Simulation::new(),
             camera: Camera::new(),
             drag_paint_state: None,
+            mid_pan_last_pos: None,
             browser_category: None,
             browser_search: String::new(),
             user_patterns: Vec::new(),

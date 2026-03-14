@@ -1,4 +1,4 @@
-use egui::{Color32, Painter, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Color32, Painter, PointerButton, Pos2, Rect, Sense, Stroke, Vec2};
 
 use crate::app::GameOfLifeApp;
 
@@ -79,7 +79,7 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
         app.sim.pattern_name = None;
     }
 
-    if response.drag_started()
+    if response.drag_started_by(PointerButton::Primary)
         && let Some(pos) = response.interact_pointer_pos()
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
     {
@@ -90,7 +90,7 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
         app.sim.pattern_name = None;
     }
 
-    if response.dragged()
+    if response.dragged_by(PointerButton::Primary)
         && let (Some(pos), Some(paint_alive)) =
             (response.interact_pointer_pos(), app.drag_paint_state)
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
@@ -99,8 +99,27 @@ fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2
         app.sim.pattern_name = None;
     }
 
-    if response.drag_stopped() {
+    if response.drag_stopped_by(PointerButton::Primary) {
         app.drag_paint_state = None;
+    }
+
+    // Middle-button pan: record start position.
+    if response.drag_started_by(PointerButton::Middle) {
+        app.mid_pan_last_pos = response.interact_pointer_pos();
+    }
+
+    // Middle-button pan: apply delta each drag event.
+    if response.dragged_by(PointerButton::Middle)
+        && let (Some(last), Some(current)) = (app.mid_pan_last_pos, response.interact_pointer_pos())
+    {
+        let delta = current - last;
+        app.camera.pan_by(delta);
+        app.mid_pan_last_pos = Some(current);
+    }
+
+    // Middle-button pan: clear state on release.
+    if response.drag_stopped_by(PointerButton::Middle) {
+        app.mid_pan_last_pos = None;
     }
 }
 

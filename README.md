@@ -37,6 +37,7 @@ and rendered via wgpu on Wayland.
 - **Smooth zoom** — `+` / `=` / `-` keys and the ＋/− toolbar buttons animate the zoom
   level; `0` resets to 100 %
 - **Mouse-anchored zoom** — `Ctrl+scroll` or pinch zooms towards the cursor
+- **Middle-drag pan** — hold and drag the middle mouse button to pan the viewport
 
 ### Population tracking
 - **Live counter** — current live-cell count displayed in the top panel
@@ -106,6 +107,7 @@ make release bump=major        # … major version
 | `-` | Zoom out |
 | `0` | Reset zoom to 100 % |
 | `Ctrl+scroll` | Zoom in / out (mouse-anchored) |
+| `Middle-drag` | Pan viewport |
 | `F1` | Show / hide keyboard cheat-sheet |
 
 ---
