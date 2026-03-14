@@ -166,8 +166,23 @@ const DEFAULT_LEVEL: u8 = 8;
 const MIN_STEP_LEVEL: u8 = 4;
 /// Dead-cell margin (rows/cols) added around a loaded pattern.
 const LOAD_MARGIN: usize = 40;
-/// Trigger GC when the arena exceeds this many nodes (≈ 28 MB at 28 B/node).
-const GC_THRESHOLD: usize = 1 << 20; // 1 048 576
+/// Trigger GC when the arena exceeds this many nodes (≈ 42 MB at 28 B/node).
+///
+/// Sweep over [768k, 1M, 1.5M, 2M] on x86_64 (hashlife/cordership_gun and large_soup_1gen):
+///   768k  → cordership 3.34 ms, large_soup 2.47 ms
+///   1M    → cordership 3.44 ms, large_soup 2.58 ms
+///   1.5M  → cordership 3.33 ms, large_soup 2.51 ms (best)
+///   2M    → cordership 3.60 ms, large_soup 2.54 ms (GC too infrequent; cache pressure)
+/// Re-swept over [768k, 1M, 1.5M, 2M, 3M] on AMD Ryzen 9 9950X3D (32 threads, x86_64):
+///   768k  → cordership 3.716 ms, large_soup 2.780 ms
+///   1M    → cordership 3.769 ms, large_soup 2.740 ms
+///   1.5M  → cordership 3.757 ms, large_soup 2.713 ms  ← best large_soup
+///   2M    → cordership 3.773 ms, large_soup 2.744 ms
+///   3M    → cordership 3.706 ms, large_soup 2.781 ms
+/// 1.5M chosen: best large_soup on both machines; comfortable headroom above the ~650k-node
+/// bench working set (768k is only ~118k above the bench and would cause spurious GCs for
+/// slightly larger real-world patterns).
+const GC_THRESHOLD: usize = 1_572_864; // 1.5M nodes
 
 // ── Level-2 lookup table ──────────────────────────────────────────────────────
 
@@ -234,9 +249,21 @@ struct Node {
 
 /// Minimum node level at which `step_recursive` splits into parallel Rayon tasks.
 ///
-/// Level 6 corresponds to a 64×64 cell region — large enough that Rayon task
-/// overhead is amortised by the work performed in each subtree.
-pub(crate) const PARALLEL_THRESHOLD: u8 = 6;
+/// Level 5 corresponds to a 32×32 cell region.  Sweep over [4, 5, 6, 7, 8] on
+/// an 8-core x86_64 machine (hashlife/gosper_gun and cordership_gun benchmarks):
+///   4 → gosper 15.4 µs, cordership 3.38 ms
+///   5 → gosper 15.2 µs, cordership 3.38 ms  (best / co-best)
+///   6 → gosper 15.6 µs, cordership 3.47 ms
+///   7 → gosper 15.4 µs, cordership 3.40 ms
+///   8 → gosper 15.3 µs, cordership 3.44 ms
+/// Re-swept over [4, 5, 6, 7] on AMD Ryzen 9 9950X3D (32 threads, x86_64):
+///   4 → gosper 17.99 µs, cordership 3.769 ms, large_soup 2.744 ms, pulsar 1.604 µs
+///   5 → gosper 17.03 µs, cordership 3.757 ms, large_soup 2.713 ms, pulsar 1.411 µs  (best)
+///   6 → gosper 18.61 µs, cordership 3.812 ms, large_soup 2.754 ms, pulsar 1.544 µs
+///   7 → gosper 17.96 µs, cordership 3.829 ms, large_soup 2.781 ms, pulsar 1.484 µs
+/// Differences are small (< 5%) but 5 is consistently best across both machines.
+/// The compile-time assert enforces PARALLEL_THRESHOLD >= 4.
+pub(crate) const PARALLEL_THRESHOLD: u8 = 5;
 
 /// Shared mutable state for a HashLife instance, protected behind `Mutex` locks
 /// so that parallel Rayon tasks spawned by `step_recursive` can safely share access.
