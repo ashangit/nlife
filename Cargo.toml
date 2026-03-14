@@ -14,7 +14,7 @@ rustc-hash = "2"
 dashmap = "6"
 # Re-enable the Vulkan backend: egui-wgpu 0.33 pulls wgpu with
 # default-features = false, so no GPU backend is compiled in otherwise.
-wgpu  = { version = "27", features = ["vulkan"] }
+wgpu  = { version = "28", features = ["vulkan"] }
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
