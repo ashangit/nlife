@@ -8,6 +8,8 @@ use crate::rle::write_cells;
 
 /// Default width of the pattern browser side panel in logical pixels.
 const BROWSER_DEFAULT_WIDTH: f32 = 220.0;
+/// Minimum width the user can drag the browser panel to.
+const BROWSER_MIN_WIDTH: f32 = 150.0;
 
 /// Width of the live-cell preview canvas inside each browser row.
 const PREVIEW_SIZE: f32 = 40.0;
@@ -30,7 +32,7 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
     egui::SidePanel::left("pattern_browser")
         .resizable(true)
         .default_width(BROWSER_DEFAULT_WIDTH)
-        .min_width(150.0)
+        .min_width(BROWSER_MIN_WIDTH)
         .show(ctx, |ui| {
             // ── Header: title + save button ───────────────────────────────────
             ui.horizontal(|ui| {
@@ -382,10 +384,11 @@ mod tests {
         assert!(!t.contains('⚠')); // standard rule — no warning
     }
 
-    /// BROWSER_DEFAULT_WIDTH must be a sensible positive value within the expected UI range.
+    /// Regression guard: default and minimum widths must stay at their agreed values.
     #[test]
-    fn test_browser_default_width() {
-        assert!(BROWSER_DEFAULT_WIDTH > 0.0 && BROWSER_DEFAULT_WIDTH <= 800.0);
+    fn test_browser_panel_width_constants() {
+        assert_eq!(BROWSER_DEFAULT_WIDTH, 220.0);
+        assert_eq!(BROWSER_MIN_WIDTH, 150.0);
     }
 
     /// is_standard_life_rule recognises all B3/S23 spellings and rejects non-standard rules.
