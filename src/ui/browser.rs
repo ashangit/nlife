@@ -384,10 +384,15 @@ mod tests {
         assert!(!t.contains('⚠')); // standard rule — no warning
     }
 
-    /// Regression guard: default and minimum widths must stay at their agreed values.
+    /// Regression guard: default panel width must stay at its agreed value.
     #[test]
-    fn test_browser_panel_width_constants() {
+    fn test_browser_default_width() {
         assert_eq!(BROWSER_DEFAULT_WIDTH, 220.0);
+    }
+
+    /// Regression guard: minimum panel width must stay at its agreed value.
+    #[test]
+    fn test_browser_min_width() {
         assert_eq!(BROWSER_MIN_WIDTH, 150.0);
     }
 
