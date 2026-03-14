@@ -702,10 +702,6 @@ impl HashLife {
     /// `expansion_per_side` is the number of cells added to each of the four
     /// sides due to `expand_root` calls (used for camera scroll compensation).
     pub(crate) fn step_universe(&mut self) -> (u64, usize) {
-        if self.store.nodes.lock().unwrap().len() > GC_THRESHOLD {
-            self.gc();
-        }
-
         let mut expansion: usize = 0;
 
         // Ensure at least MIN_STEP_LEVEL (and enough room for the requested
@@ -796,6 +792,15 @@ impl HashLife {
 
     // ── Garbage collection ────────────────────────────────────────────────────
 
+    /// Returns `true` when the arena has grown past the GC threshold.
+    ///
+    /// Locks `nodes` briefly; intended to be called from the frame loop so
+    /// that `gc()` can be deferred to an idle window rather than called
+    /// mid-step inside `step_universe`.
+    pub(crate) fn needs_gc(&self) -> bool {
+        self.store.nodes.lock().unwrap().len() > GC_THRESHOLD
+    }
+
     /// Collects unreachable nodes from the arena, compacting it.
     ///
     /// Performs a mark-sweep-compact cycle:
@@ -809,7 +814,7 @@ impl HashLife {
     /// 5. **Remap step_cache** — keep only entries where both the source node
     ///    and the result node survived; translate IDs through `remap`.
     /// 6. **Commit** — update `self.root`, replace `self.nodes`.
-    fn gc(&mut self) {
+    pub(crate) fn gc(&mut self) {
         // Lock all three stores for the duration of GC to prevent concurrent access.
         let mut nodes = self.store.nodes.lock().unwrap();
         let mut canon = self.store.canon.lock().unwrap();
@@ -1818,6 +1823,164 @@ mod tests {
             hl.store.nodes.lock().unwrap().len() < before,
             "GC must reclaim nodes: before={before}, after={}",
             hl.store.nodes.lock().unwrap().len()
+        );
+    }
+
+    // ── needs_gc / deferred-GC tests ─────────────────────────────────────────
+
+    /// `needs_gc()` returns `false` for a freshly created HashLife instance
+    /// (node count << GC_THRESHOLD).
+    #[test]
+    fn test_needs_gc_false_below_threshold() {
+        let hl = HashLife::new();
+        assert!(
+            !hl.needs_gc(),
+            "fresh HashLife arena should be well below GC_THRESHOLD"
+        );
+    }
+
+    /// After a long run the node count eventually exceeds the threshold, at
+    /// which point `needs_gc()` returns `true`.  After calling `gc()` it
+    /// returns `false` again and the population is unchanged.
+    #[test]
+    fn test_needs_gc_true_after_growth_then_false_after_gc() {
+        let mut hl = HashLife::new();
+        // Gosper glider gun – rapidly inflates the arena.
+        let gosper: &[(i32, i32)] = &[
+            (0, 24),
+            (1, 22),
+            (1, 24),
+            (2, 12),
+            (2, 13),
+            (2, 20),
+            (2, 21),
+            (2, 34),
+            (2, 35),
+            (3, 11),
+            (3, 15),
+            (3, 20),
+            (3, 21),
+            (3, 34),
+            (3, 35),
+            (4, 0),
+            (4, 1),
+            (4, 10),
+            (4, 16),
+            (4, 20),
+            (4, 21),
+            (5, 0),
+            (5, 1),
+            (5, 10),
+            (5, 14),
+            (5, 16),
+            (5, 17),
+            (5, 22),
+            (5, 24),
+            (6, 10),
+            (6, 16),
+            (6, 24),
+            (7, 11),
+            (7, 15),
+            (8, 12),
+            (8, 13),
+        ];
+        hl.set_cells(gosper);
+
+        // Keep stepping until the arena exceeds GC_THRESHOLD or until a
+        // reasonable iteration cap to avoid an infinite loop in CI.
+        let mut total = 0u64;
+        let mut hit_threshold = false;
+        while total < 10_000_000 {
+            let (g, _) = hl.step_universe();
+            total += g;
+            if hl.needs_gc() {
+                hit_threshold = true;
+                break;
+            }
+        }
+        assert!(
+            hit_threshold,
+            "arena should exceed GC_THRESHOLD after long run"
+        );
+
+        let pop_before = hl.population();
+        hl.gc();
+        assert!(
+            !hl.needs_gc(),
+            "needs_gc() must return false immediately after gc()"
+        );
+        assert_eq!(
+            hl.population(),
+            pop_before,
+            "gc() must not alter observable population"
+        );
+    }
+
+    /// `step_universe` does NOT call `gc()` internally: after the arena grows
+    /// past the threshold a step must not reduce the node count.
+    #[test]
+    fn test_step_universe_does_not_gc_mid_step() {
+        let mut hl = HashLife::new();
+        let gosper: &[(i32, i32)] = &[
+            (0, 24),
+            (1, 22),
+            (1, 24),
+            (2, 12),
+            (2, 13),
+            (2, 20),
+            (2, 21),
+            (2, 34),
+            (2, 35),
+            (3, 11),
+            (3, 15),
+            (3, 20),
+            (3, 21),
+            (3, 34),
+            (3, 35),
+            (4, 0),
+            (4, 1),
+            (4, 10),
+            (4, 16),
+            (4, 20),
+            (4, 21),
+            (5, 0),
+            (5, 1),
+            (5, 10),
+            (5, 14),
+            (5, 16),
+            (5, 17),
+            (5, 22),
+            (5, 24),
+            (6, 10),
+            (6, 16),
+            (6, 24),
+            (7, 11),
+            (7, 15),
+            (8, 12),
+            (8, 13),
+        ];
+        hl.set_cells(gosper);
+
+        // Advance until arena just exceeds the threshold.
+        let mut total = 0u64;
+        loop {
+            let (g, _) = hl.step_universe();
+            total += g;
+            if hl.needs_gc() {
+                break;
+            }
+            if total > 10_000_000 {
+                panic!("arena never reached GC_THRESHOLD — test is invalid");
+            }
+        }
+
+        let node_count_before = hl.store.nodes.lock().unwrap().len();
+        // One more step must NOT decrease the node count (GC is not inside step_universe).
+        hl.step_universe();
+        let node_count_after = hl.store.nodes.lock().unwrap().len();
+        assert!(
+            node_count_after >= node_count_before,
+            "step_universe must not run GC: before={node_count_before}, after={node_count_after}"
         );
     }
 
