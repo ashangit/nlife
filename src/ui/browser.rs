@@ -6,6 +6,9 @@ use crate::app::{BrowserEntry, GameOfLifeApp};
 use crate::library::{Category, decoded_library};
 use crate::rle::write_cells;
 
+/// Default width of the pattern browser side panel in logical pixels.
+const BROWSER_DEFAULT_WIDTH: f32 = 220.0;
+
 /// Width of the live-cell preview canvas inside each browser row.
 const PREVIEW_SIZE: f32 = 40.0;
 
@@ -25,8 +28,9 @@ const PREVIEW_SIZE: f32 = 40.0;
 /// * `ctx` — egui context used to show the panel
 pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context) {
     egui::SidePanel::left("pattern_browser")
-        .resizable(false)
-        .default_width(220.0)
+        .resizable(true)
+        .default_width(BROWSER_DEFAULT_WIDTH)
+        .min_width(150.0)
         .show(ctx, |ui| {
             // ── Header: title + save button ───────────────────────────────────
             ui.horizontal(|ui| {
@@ -376,6 +380,12 @@ mod tests {
         assert!(t.contains("Author: John"));
         assert!(t.contains("A description"));
         assert!(!t.contains('⚠')); // standard rule — no warning
+    }
+
+    /// BROWSER_DEFAULT_WIDTH must be a sensible positive value within the expected UI range.
+    #[test]
+    fn test_browser_default_width() {
+        assert!(BROWSER_DEFAULT_WIDTH > 0.0 && BROWSER_DEFAULT_WIDTH <= 800.0);
     }
 
     /// is_standard_life_rule recognises all B3/S23 spellings and rejects non-standard rules.
