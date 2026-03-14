@@ -19,7 +19,20 @@ use crate::camera::{DEFAULT_CELL_SIZE, ZOOM_STEP};
 /// * `app` — mutable application state
 /// * `ctx` — egui context for reading input
 pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
-    let (toggle, step, clear, grid_lines, help, zoom_in, zoom_out, zoom_reset) = ctx.input(|i| {
+    let (
+        toggle,
+        step,
+        clear,
+        grid_lines,
+        help,
+        zoom_in,
+        zoom_out,
+        zoom_reset,
+        copy,
+        paste,
+        delete,
+        escape,
+    ) = ctx.input(|i| {
         (
             i.key_pressed(Key::Space),
             i.key_pressed(Key::S) && !app.sim.running,
@@ -29,6 +42,10 @@ pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus),
             i.key_pressed(Key::Minus),
             i.key_pressed(Key::Num0),
+            i.key_pressed(Key::C) && i.modifiers.ctrl,
+            i.key_pressed(Key::V) && i.modifiers.ctrl,
+            i.key_pressed(Key::Delete),
+            i.key_pressed(Key::Escape),
         )
     });
     if toggle {
@@ -37,6 +54,7 @@ pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
     if step {
         let (t, l) = app.sim.step_once();
         app.camera.apply_expansion(t, l);
+        app.shift_selection(t, l);
     }
     if clear {
         app.sim.clear();
@@ -46,6 +64,20 @@ pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
     }
     if help {
         app.show_help = !app.show_help;
+    }
+    if copy {
+        app.copy_selection();
+    }
+    if paste && !app.clipboard.is_empty() {
+        app.paste_anchor = Some((0, 0));
+    }
+    if delete {
+        app.delete_selection();
+    }
+    if escape {
+        app.selection = None;
+        app.selection_drag_start = None;
+        app.paste_anchor = None;
     }
     let center = app.camera.viewport_rect.size() / 2.0;
     if zoom_in {
