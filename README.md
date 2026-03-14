@@ -61,6 +61,8 @@ and rendered via wgpu on Wayland.
 - **Native file dialogs** — 💾 and 📂 toolbar buttons open OS-native choosers for
   exporting or importing `.cells` / `.rle` files
 - **Auto-reload** — user patterns are rescanned after every save and loaded at startup
+- **Drag-and-drop** — drag a `.rle` or `.cells` file directly onto the window to load and
+  centre it instantly; unsupported file types show a dismissible error message
 
 ### UI extras
 - **Keyboard cheat-sheet** — `F1` toggles an overlay listing all shortcuts
