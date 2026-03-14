@@ -15,6 +15,28 @@ cargo build --release # optimised build
 cargo bench --bench step   # microbenchmarks; run before/after any performance change
 ```
 
+## Workflow
+
+- **Always plan first**: for any non-trivial change (new feature, multi-file edit, refactor)
+  use `EnterPlanMode`, design the approach, and get user approval before writing any code.
+- **Commit after every source code change**: once tests, linter, and formatter all pass,
+  create a git commit.  Do not bundle unrelated changes into a single commit.  The commit
+  message body must list every modified file with a concise explanation of what changed in
+  it and why (not just "updated X" — describe the actual change).
+- **Summarise changes**: after completing any modification, provide a summary listing every
+  modified file and a brief description of what changed in each.
+- **Benchmark after perf changes**: for any change intended as a performance improvement,
+  capture a baseline *before* making changes with
+  `cargo bench --bench step -- --save-baseline before`, implement the change, then run
+  `cargo bench --bench step -- --save-baseline after` and compare with
+  `cargo bench --bench step -- --load-baseline before --baseline after`.
+  A regression on any existing benchmark must be justified or fixed before the commit is
+  complete.  This applies to any module, not just `grid.rs`.
+- **Unit tests are mandatory**: every source code change must include corresponding test
+  updates — add new tests for new behaviour, update existing tests when behaviour changes,
+  and delete tests that cover removed functionality.  A change without an appropriate test
+  delta is incomplete.
+
 ## Architecture
 
 `newlife` is a Conway's Game of Life desktop app built with egui 0.33 / eframe 0.33 (wgpu renderer, Wayland).
