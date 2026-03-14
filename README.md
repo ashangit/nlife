@@ -45,7 +45,8 @@ and rendered via wgpu on Wayland.
 
 ### Pattern library (1 284 built-in)
 - **Browser panel** (left side) — filterable by category, searchable by name, each entry
-  shows a 40×40 miniature preview
+  shows a 40×40 miniature preview; the panel is drag-resizable (drag the right edge to
+  adjust its width; minimum 150 px; width is preserved for the session)
 - *Still lifes* (366): Block, Beehive, Loaf, Boat, Tub, Pond, Ship, Long Boat, and many more
 - *Oscillators* (582): Blinker, Toad, Beacon, Pulsar, Pentadecathlon, Figure Eight, Queen Bee Shuttle, and many more
 - *Guns* (80): Gosper Glider Gun, 6-Engine Cordership Gun, and many more
