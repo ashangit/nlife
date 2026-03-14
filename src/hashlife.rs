@@ -1428,6 +1428,46 @@ mod tests {
     // `super::*` resolves differently when included via #[path] in the bench binary
     use super::*;
 
+    /// Gosper glider gun — period 30, emits one glider every 30 generations.
+    const GOSPER_GUN: &[(i32, i32)] = &[
+        (0, 24),
+        (1, 22),
+        (1, 24),
+        (2, 12),
+        (2, 13),
+        (2, 20),
+        (2, 21),
+        (2, 34),
+        (2, 35),
+        (3, 11),
+        (3, 15),
+        (3, 20),
+        (3, 21),
+        (3, 34),
+        (3, 35),
+        (4, 0),
+        (4, 1),
+        (4, 10),
+        (4, 16),
+        (4, 20),
+        (4, 21),
+        (5, 0),
+        (5, 1),
+        (5, 10),
+        (5, 14),
+        (5, 16),
+        (5, 17),
+        (5, 22),
+        (5, 24),
+        (6, 10),
+        (6, 16),
+        (6, 24),
+        (7, 11),
+        (7, 15),
+        (8, 12),
+        (8, 13),
+    ];
+
     // ── Internals ─────────────────────────────────────────────────────────────
 
     /// DEAD and ALIVE are always at fixed indices 0 and 1 with the correct pop.
@@ -1768,45 +1808,7 @@ mod tests {
     fn test_gc_reclaims_nodes() {
         let mut hl = HashLife::new();
         // Gosper glider gun (period 30, emits one glider every 30 gens).
-        let gosper: &[(i32, i32)] = &[
-            (0, 24),
-            (1, 22),
-            (1, 24),
-            (2, 12),
-            (2, 13),
-            (2, 20),
-            (2, 21),
-            (2, 34),
-            (2, 35),
-            (3, 11),
-            (3, 15),
-            (3, 20),
-            (3, 21),
-            (3, 34),
-            (3, 35),
-            (4, 0),
-            (4, 1),
-            (4, 10),
-            (4, 16),
-            (4, 20),
-            (4, 21),
-            (5, 0),
-            (5, 1),
-            (5, 10),
-            (5, 14),
-            (5, 16),
-            (5, 17),
-            (5, 22),
-            (5, 24),
-            (6, 10),
-            (6, 16),
-            (6, 24),
-            (7, 11),
-            (7, 15),
-            (8, 12),
-            (8, 13),
-        ];
-        hl.set_cells(gosper);
+        hl.set_cells(GOSPER_GUN);
 
         // Run until at least 2000 generations to fill the arena with stale
         // intermediate nodes.  Cap by total gens to avoid overflow.
@@ -1846,45 +1848,7 @@ mod tests {
     fn test_needs_gc_true_after_growth_then_false_after_gc() {
         let mut hl = HashLife::new();
         // Gosper glider gun – rapidly inflates the arena.
-        let gosper: &[(i32, i32)] = &[
-            (0, 24),
-            (1, 22),
-            (1, 24),
-            (2, 12),
-            (2, 13),
-            (2, 20),
-            (2, 21),
-            (2, 34),
-            (2, 35),
-            (3, 11),
-            (3, 15),
-            (3, 20),
-            (3, 21),
-            (3, 34),
-            (3, 35),
-            (4, 0),
-            (4, 1),
-            (4, 10),
-            (4, 16),
-            (4, 20),
-            (4, 21),
-            (5, 0),
-            (5, 1),
-            (5, 10),
-            (5, 14),
-            (5, 16),
-            (5, 17),
-            (5, 22),
-            (5, 24),
-            (6, 10),
-            (6, 16),
-            (6, 24),
-            (7, 11),
-            (7, 15),
-            (8, 12),
-            (8, 13),
-        ];
-        hl.set_cells(gosper);
+        hl.set_cells(GOSPER_GUN);
 
         // Keep stepping until the arena exceeds GC_THRESHOLD or until a
         // reasonable iteration cap to avoid an infinite loop in CI.
@@ -1921,45 +1885,7 @@ mod tests {
     #[test]
     fn test_step_universe_does_not_gc_mid_step() {
         let mut hl = HashLife::new();
-        let gosper: &[(i32, i32)] = &[
-            (0, 24),
-            (1, 22),
-            (1, 24),
-            (2, 12),
-            (2, 13),
-            (2, 20),
-            (2, 21),
-            (2, 34),
-            (2, 35),
-            (3, 11),
-            (3, 15),
-            (3, 20),
-            (3, 21),
-            (3, 34),
-            (3, 35),
-            (4, 0),
-            (4, 1),
-            (4, 10),
-            (4, 16),
-            (4, 20),
-            (4, 21),
-            (5, 0),
-            (5, 1),
-            (5, 10),
-            (5, 14),
-            (5, 16),
-            (5, 17),
-            (5, 22),
-            (5, 24),
-            (6, 10),
-            (6, 16),
-            (6, 24),
-            (7, 11),
-            (7, 15),
-            (8, 12),
-            (8, 13),
-        ];
-        hl.set_cells(gosper);
+        hl.set_cells(GOSPER_GUN);
 
         // Advance until arena just exceeds the threshold.
         let mut total = 0u64;
@@ -2213,50 +2139,11 @@ mod tests {
     /// constructed instances — confirming the sequential path is unaffected.
     #[test]
     fn test_parallel_small_pattern_gosper_gun_correctness() {
-        let gosper: &[(i32, i32)] = &[
-            (0, 24),
-            (1, 22),
-            (1, 24),
-            (2, 12),
-            (2, 13),
-            (2, 20),
-            (2, 21),
-            (2, 34),
-            (2, 35),
-            (3, 11),
-            (3, 15),
-            (3, 20),
-            (3, 21),
-            (3, 34),
-            (3, 35),
-            (4, 0),
-            (4, 1),
-            (4, 10),
-            (4, 16),
-            (4, 20),
-            (4, 21),
-            (5, 0),
-            (5, 1),
-            (5, 10),
-            (5, 14),
-            (5, 16),
-            (5, 17),
-            (5, 22),
-            (5, 24),
-            (6, 10),
-            (6, 16),
-            (6, 24),
-            (7, 11),
-            (7, 15),
-            (8, 12),
-            (8, 13),
-        ];
-
         // Two independent HashLife instances must agree exactly.
         let mut hl1 = HashLife::new();
-        hl1.set_cells(gosper);
+        hl1.set_cells(GOSPER_GUN);
         let mut hl2 = HashLife::new();
-        hl2.set_cells(gosper);
+        hl2.set_cells(GOSPER_GUN);
 
         let mut total1 = 0u64;
         let mut total2 = 0u64;
