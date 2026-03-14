@@ -57,6 +57,12 @@ pub(crate) struct Simulation {
     /// Propagated to the [`HashLife`] engine before each step.  Has no effect
     /// when the SWAR engine is active.
     pub(crate) hl_step_log2: u8,
+    /// Name of the currently loaded pattern, if any.
+    ///
+    /// Set when a pattern is loaded from the browser or via file I/O.
+    /// Cleared when the grid is cleared, filled randomly, or manually edited.
+    /// Preserved across engine switches.
+    pub(crate) pattern_name: Option<String>,
 }
 
 impl Simulation {
@@ -70,6 +76,7 @@ impl Simulation {
             time_since_last_step: 0.0,
             steps_per_frame: 1,
             hl_step_log2: 0,
+            pattern_name: None,
         }
     }
 
@@ -245,6 +252,7 @@ impl Simulation {
         }
         self.generation = 0;
         self.time_since_last_step = 0.0;
+        self.pattern_name = None;
     }
 
     /// Clears the grid, resets the generation counter, and stops the simulation.
@@ -256,6 +264,7 @@ impl Simulation {
         self.generation = 0;
         self.running = false;
         self.time_since_last_step = 0.0;
+        self.pattern_name = None;
     }
 
     /// Advances the active engine by one logical step and returns
@@ -454,5 +463,51 @@ mod tests {
         // default hl_step_log2=0 → 2^0 = 1 generation per step
         sim.step_once();
         assert_eq!(sim.generation, 1);
+    }
+
+    // ── pattern_name tests ────────────────────────────────────────────────────
+
+    /// pattern_name initialises to None.
+    #[test]
+    fn test_pattern_name_initialises_none() {
+        let sim = Simulation::new();
+        assert!(sim.pattern_name.is_none());
+    }
+
+    /// pattern_name can be set via direct assignment.
+    #[test]
+    fn test_pattern_name_can_be_set() {
+        let mut sim = Simulation::new();
+        sim.pattern_name = Some("glider".to_owned());
+        assert_eq!(sim.pattern_name.as_deref(), Some("glider"));
+    }
+
+    /// clear() resets pattern_name to None.
+    #[test]
+    fn test_pattern_name_cleared_by_clear() {
+        let mut sim = Simulation::new();
+        sim.pattern_name = Some("blinker".to_owned());
+        sim.clear();
+        assert!(sim.pattern_name.is_none());
+    }
+
+    /// fill_random() resets pattern_name to None.
+    #[test]
+    fn test_pattern_name_cleared_by_fill_random() {
+        let mut sim = Simulation::new();
+        sim.pattern_name = Some("glider".to_owned());
+        sim.fill_random(50);
+        assert!(sim.pattern_name.is_none());
+    }
+
+    /// toggle_engine() does NOT clear pattern_name.
+    #[test]
+    fn test_pattern_name_preserved_by_toggle_engine() {
+        let mut sim = Simulation::new();
+        sim.pattern_name = Some("lwss".to_owned());
+        sim.toggle_engine(); // SWAR → HashLife
+        assert_eq!(sim.pattern_name.as_deref(), Some("lwss"));
+        sim.toggle_engine(); // HashLife → SWAR
+        assert_eq!(sim.pattern_name.as_deref(), Some("lwss"));
     }
 }

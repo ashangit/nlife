@@ -110,7 +110,7 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
 
             // Split into disjoint field borrows so the scroll closure can mutate
             // `preview_textures` while reading `browser_entries` and `user_patterns`.
-            let mut to_load: Option<Vec<(i32, i32)>> = None;
+            let mut to_load: Option<(Vec<(i32, i32)>, String)> = None;
             {
                 let entries = &app.browser_entries;
                 let user_patterns = &app.user_patterns;
@@ -152,14 +152,15 @@ pub(crate) fn draw_pattern_browser(app: &mut GameOfLifeApp, ctx: &egui::Context)
                                     btn = btn.on_hover_text(text.as_str());
                                 }
                                 if btn.clicked() {
-                                    to_load = Some(cells.to_vec());
+                                    to_load = Some((cells.to_vec(), name.to_owned()));
                                 }
                             });
                         }
                     });
             }
-            if let Some(cells) = to_load {
+            if let Some((cells, name)) = to_load {
                 app.sim.load_cells(&cells);
+                app.sim.pattern_name = Some(name);
                 app.center_camera_on_grid();
             }
         });
