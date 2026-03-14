@@ -62,6 +62,7 @@ and rendered via wgpu on Wayland.
 
 ### UI extras
 - **Keyboard cheat-sheet** — `F1` toggles an overlay listing all shortcuts
+- **Pattern name display** — the name of the currently loaded pattern (from the browser or a file) is shown in the top panel next to the generation counter; it is cleared when the grid is edited, cleared, or randomly filled
 
 ---
 

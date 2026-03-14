@@ -52,6 +52,11 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             ui.separator();
             ui.label(format!("Gen: {}", app.sim.generation));
 
+            if let Some(n) = &app.sim.pattern_name {
+                ui.separator();
+                ui.add(egui::Label::new(n).truncate());
+            }
+
             ui.separator();
             let pop = app.sim.population();
             ui.label(format!("Pop: {pop}"));
@@ -147,6 +152,8 @@ pub(crate) fn draw_top_panel(app: &mut GameOfLifeApp, ctx: &egui::Context) {
                 };
                 if let Some(cells) = cells {
                     app.sim.load_cells(&crate::rle::center_cells(cells));
+                    app.sim.pattern_name =
+                        path.file_stem().and_then(|s| s.to_str()).map(str::to_owned);
                     app.center_camera_on_grid();
                 }
             }
