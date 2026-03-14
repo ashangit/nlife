@@ -23,6 +23,11 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("F1", "Show / hide this cheat-sheet"),
     ("Ctrl+scroll", "Zoom in / out"),
     ("Middle-drag", "Pan viewport"),
+    ("Shift+drag", "Rectangular selection"),
+    ("Ctrl+C", "Copy selection"),
+    ("Ctrl+V", "Paste clipboard (click to place)"),
+    ("Delete", "Delete selection"),
+    ("Escape", "Clear selection / cancel paste"),
 ];
 
 /// An entry in the filtered, unified browser list.
@@ -83,6 +88,17 @@ pub struct GameOfLifeApp {
     /// Error message from the last failed drag-and-drop file load, shown as a
     /// dismissible window at the bottom of the screen.
     pub(crate) drop_error: Option<String>,
+    /// Currently active rectangular selection as inclusive grid coordinates
+    /// `[rmin, cmin, rmax, cmax]`, or `None` when no selection is active.
+    pub(crate) selection: Option<[usize; 4]>,
+    /// Grid coordinate where the user began dragging a rectangular selection.
+    pub(crate) selection_drag_start: Option<(usize, usize)>,
+    /// Clipboard: live cells copied from the last `copy_selection` call,
+    /// stored as `(row_offset, col_offset)` relative to the selection top-left.
+    pub(crate) clipboard: Vec<(i64, i64)>,
+    /// Anchor (top-left grid cell) for the pending paste preview, or `None`
+    /// when no paste is in progress.
+    pub(crate) paste_anchor: Option<(usize, usize)>,
 }
 
 impl GameOfLifeApp {
@@ -112,6 +128,10 @@ impl GameOfLifeApp {
             browser_entries_search: String::new(),
             preview_textures: HashMap::new(),
             drop_error: None,
+            selection: None,
+            selection_drag_start: None,
+            clipboard: Vec::new(),
+            paste_anchor: None,
         };
         app.rebuild_browser_entries();
         app
@@ -268,12 +288,90 @@ impl GameOfLifeApp {
         let dt = (ctx.input(|i| i.unstable_dt) as f64).min(0.1);
         let (t, l) = self.sim.advance(dt);
         self.camera.apply_expansion(t, l);
+        self.shift_selection(t, l);
         // Track live-cell population history (max 128 samples).
         self.pop_history.push_back(self.sim.population());
         if self.pop_history.len() > 128 {
             self.pop_history.pop_front();
         }
         ctx.request_repaint();
+    }
+}
+
+// ── Selection / clipboard ─────────────────────────────────────────────────────
+
+impl GameOfLifeApp {
+    /// Copies all live cells within `self.selection` into `self.clipboard` as
+    /// `(row_offset, col_offset)` pairs relative to the selection's top-left
+    /// corner `(rmin, cmin)`.  Does nothing when `self.selection` is `None`.
+    pub(crate) fn copy_selection(&mut self) {
+        let [rmin, cmin, rmax, cmax] = match self.selection {
+            Some(s) => s,
+            None => return,
+        };
+        let live = self
+            .sim
+            .live_cells_in_viewport(rmin, cmin, rmax + 1, cmax + 1);
+        self.clipboard = live
+            .into_iter()
+            .map(|(r, c)| (r as i64 - rmin as i64, c as i64 - cmin as i64))
+            .collect();
+    }
+
+    /// Erases every live cell that falls within `self.selection`, then clears
+    /// `self.selection`.  Does nothing when `self.selection` is `None`.
+    pub(crate) fn delete_selection(&mut self) {
+        let [rmin, cmin, rmax, cmax] = match self.selection {
+            Some(s) => s,
+            None => return,
+        };
+        let live = self
+            .sim
+            .live_cells_in_viewport(rmin, cmin, rmax + 1, cmax + 1);
+        for (r, c) in live {
+            self.sim.set(r, c, false);
+        }
+        self.selection = None;
+    }
+
+    /// Places the clipboard cells into the grid at absolute position
+    /// `(anchor_row, anchor_col)`.  Clipboard offsets that would land outside
+    /// the grid bounds are silently skipped.  Does nothing when
+    /// `self.clipboard` is empty.
+    pub(crate) fn commit_paste(&mut self, anchor_row: usize, anchor_col: usize) {
+        let width = self.sim.width();
+        let height = self.sim.height();
+        for &(dr, dc) in &self.clipboard {
+            let r = anchor_row as i64 + dr;
+            let c = anchor_col as i64 + dc;
+            if r < 0 || c < 0 || r as usize >= height || c as usize >= width {
+                continue;
+            }
+            self.sim.set(r as usize, c as usize, true);
+        }
+    }
+
+    /// Shifts the selection, drag-start, and paste-anchor coordinates after a
+    /// grid auto-expansion.
+    ///
+    /// Called from `advance_simulation` with the `(add_top, add_left)` values
+    /// returned by `sim.advance` so that the selection rectangle stays aligned
+    /// with the same logical cells after the grid grows.
+    pub(crate) fn shift_selection(&mut self, add_top: usize, add_left: usize) {
+        if let Some(ref mut sel) = self.selection {
+            sel[0] += add_top;
+            sel[2] += add_top;
+            sel[1] += add_left;
+            sel[3] += add_left;
+        }
+        if let Some(ref mut start) = self.selection_drag_start {
+            start.0 += add_top;
+            start.1 += add_left;
+        }
+        if let Some(ref mut anchor) = self.paste_anchor {
+            anchor.0 += add_top;
+            anchor.1 += add_left;
+        }
     }
 }
 
@@ -313,6 +411,10 @@ impl GameOfLifeApp {
             browser_entries_search: String::new(),
             preview_textures: HashMap::new(),
             drop_error: None,
+            selection: None,
+            selection_drag_start: None,
+            clipboard: Vec::new(),
+            paste_anchor: None,
         };
         app.rebuild_browser_entries();
         app
@@ -504,6 +606,147 @@ mod tests {
         assert!(
             result.is_ok(),
             ".RLE uppercase extension should be accepted"
+        );
+    }
+
+    // ── Selection / copy / paste tests ────────────────────────────────────────
+
+    /// Helper: place a set of (row, col) live cells into `app.sim`.
+    fn place_cells(app: &mut GameOfLifeApp, cells: &[(usize, usize)]) {
+        for &(r, c) in cells {
+            app.sim.set(r, c, true);
+        }
+    }
+
+    /// copy_selection copies exactly the live cells inside the selection as
+    /// relative (dr, dc) offsets from (rmin, cmin).
+    #[test]
+    fn test_copy_selection_basic() {
+        let mut app = GameOfLifeApp::new_for_test();
+        // Place three live cells: two inside selection, one outside.
+        place_cells(&mut app, &[(2, 3), (2, 5), (10, 10)]);
+        // Selection covers rows 2..=4, cols 3..=6 — captures (2,3) and (2,5).
+        app.selection = Some([2, 3, 4, 6]);
+        app.copy_selection();
+        let mut got = app.clipboard.clone();
+        got.sort_unstable();
+        // Expected relative offsets: (2-2, 3-3)=(0,0) and (2-2, 5-3)=(0,2).
+        let mut expected: Vec<(i64, i64)> = vec![(0, 0), (0, 2)];
+        expected.sort_unstable();
+        assert_eq!(
+            got, expected,
+            "clipboard should contain only cells inside selection as relative offsets"
+        );
+    }
+
+    /// copy_selection with no live cells inside the selection yields an empty clipboard.
+    #[test]
+    fn test_copy_selection_empty_region() {
+        let mut app = GameOfLifeApp::new_for_test();
+        // Live cells are entirely outside the selection.
+        place_cells(&mut app, &[(20, 20), (30, 30)]);
+        app.selection = Some([0, 0, 5, 5]);
+        app.copy_selection();
+        assert!(
+            app.clipboard.is_empty(),
+            "clipboard must be empty when selection contains no live cells"
+        );
+    }
+
+    /// delete_selection erases cells inside the selection and leaves cells
+    /// outside untouched; selection is cleared afterwards.
+    #[test]
+    fn test_delete_selection_erases_inside_and_preserves_outside() {
+        let mut app = GameOfLifeApp::new_for_test();
+        // Cells inside selection at (3,3) and (4,4); outside at (10,10).
+        place_cells(&mut app, &[(3, 3), (4, 4), (10, 10)]);
+        app.selection = Some([3, 3, 5, 5]);
+        app.delete_selection();
+        assert!(
+            !app.sim.get(3, 3),
+            "cell (3,3) inside selection must be dead after delete"
+        );
+        assert!(
+            !app.sim.get(4, 4),
+            "cell (4,4) inside selection must be dead after delete"
+        );
+        assert!(
+            app.sim.get(10, 10),
+            "cell (10,10) outside selection must remain alive"
+        );
+        assert!(
+            app.selection.is_none(),
+            "selection must be cleared after delete_selection"
+        );
+    }
+
+    /// commit_paste places clipboard cells at the given anchor.
+    #[test]
+    fn test_commit_paste_basic() {
+        let mut app = GameOfLifeApp::new_for_test();
+        // Manually load clipboard: relative offsets (0,0) and (1,2).
+        app.clipboard = vec![(0, 0), (1, 2)];
+        // Paste at anchor (5, 7).
+        app.commit_paste(5, 7);
+        assert!(
+            app.sim.get(5, 7),
+            "cell (5,7) = anchor + (0,0) must be alive after paste"
+        );
+        assert!(
+            app.sim.get(6, 9),
+            "cell (6,9) = anchor + (1,2) must be alive after paste"
+        );
+    }
+
+    /// copy → delete → paste at the same origin reproduces the original pattern.
+    #[test]
+    fn test_copy_paste_round_trip() {
+        let mut app = GameOfLifeApp::new_for_test();
+        // Place an L-shaped pattern inside a 5×5 selection at (2,2).
+        let original: Vec<(usize, usize)> = vec![(2, 2), (3, 2), (4, 2), (4, 3)];
+        place_cells(&mut app, &original);
+        app.selection = Some([2, 2, 6, 6]);
+        // Step 1: copy.
+        app.copy_selection();
+        // Step 2: delete.
+        app.selection = Some([2, 2, 6, 6]);
+        app.delete_selection();
+        // Verify all original cells are gone.
+        for &(r, c) in &original {
+            assert!(
+                !app.sim.get(r, c),
+                "cell ({r},{c}) must be dead after delete"
+            );
+        }
+        // Step 3: paste back at original top-left (2,2).
+        app.commit_paste(2, 2);
+        // Verify original pattern is reproduced.
+        for &(r, c) in &original {
+            assert!(
+                app.sim.get(r, c),
+                "cell ({r},{c}) must be alive after round-trip paste"
+            );
+        }
+    }
+
+    /// commit_paste near the grid edge silently skips out-of-bounds offsets.
+    #[test]
+    fn test_commit_paste_out_of_bounds_skips_without_panic() {
+        let mut app = GameOfLifeApp::new_for_test();
+        // Grid is 100×60 by default (GRID_COLS × GRID_ROWS).
+        // Anchor at bottom-right corner; offsets (0,0), (5,10), (100,200) — last two OOB.
+        app.clipboard = vec![(0, 0), (5, 10), (100, 200)];
+        let height = app.sim.height();
+        let width = app.sim.width();
+        // Anchor near the bottom-right so that large offsets go OOB.
+        let anchor_row = height.saturating_sub(3);
+        let anchor_col = width.saturating_sub(3);
+        // Must not panic.
+        app.commit_paste(anchor_row, anchor_col);
+        // The (0,0) offset should be alive (anchor itself is in bounds).
+        assert!(
+            app.sim.get(anchor_row, anchor_col),
+            "in-bounds cell at anchor must be alive after paste"
         );
     }
 }

@@ -14,6 +14,14 @@ const COLOR_DEAD: Color32 = Color32::from_gray(45);
 const GRID_LINE_MIN_CELL_SIZE: f32 = 4.0;
 /// Colour for grid lines.
 const COLOR_GRID_LINE: Color32 = Color32::from_gray(60);
+/// Colour for the rectangular selection overlay border.
+const COLOR_SELECTION: Color32 = Color32::from_rgba_premultiplied(100, 180, 255, 180);
+/// Colour for ghost (paste-preview) cells.
+const COLOR_GHOST: Color32 = Color32::from_rgba_premultiplied(180, 230, 100, 120);
+/// Filled dash length in logical pixels for the selection border.
+const DASH_FILLED_PX: f32 = 6.0;
+/// Gap length in logical pixels for the selection border.
+const DASH_GAP_PX: f32 = 4.0;
 
 /// Draws the central grid canvas and handles mouse drag-painting.
 ///
@@ -48,6 +56,10 @@ pub(crate) fn draw_grid(app: &mut GameOfLifeApp, ui: &mut egui::Ui) {
         paint_grid_lines(app, &painter, origin, viewport);
     }
 
+    // Draw selection overlay and ghost paste-preview cells.
+    paint_selection_overlay(app, &painter, origin);
+    paint_ghost_cells(app, &painter, origin);
+
     // Show cell coordinate tooltip on hover.
     if let Some(hover_pos) = response.hover_pos()
         && let Some((row, col)) =
@@ -70,37 +82,71 @@ pub(crate) fn draw_grid(app: &mut GameOfLifeApp, ui: &mut egui::Ui) {
 fn handle_mouse(app: &mut GameOfLifeApp, response: &egui::Response, origin: Pos2) {
     let (w, h) = (app.sim.width(), app.sim.height());
 
-    // Handle single click (press+release without drag)
+    // Read whether Shift is currently held.
+    let shift_held = response.ctx.input(|i| i.modifiers.shift);
+
+    // Update paste anchor to follow the hovered cell when paste mode is active.
+    if app.paste_anchor.is_some()
+        && let Some(pos) = response.hover_pos()
+        && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
+    {
+        app.paste_anchor = Some((row, col));
+    }
+
+    // Left-click (no drag) while in paste mode: commit paste at hover cell.
     if response.clicked()
         && let Some(pos) = response.interact_pointer_pos()
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
     {
-        app.sim.toggle(row, col);
-        app.sim.pattern_name = None;
+        if app.paste_anchor.is_some() {
+            app.commit_paste(row, col);
+            app.paste_anchor = None;
+        } else if !shift_held {
+            app.sim.toggle(row, col);
+            app.sim.pattern_name = None;
+        }
     }
 
+    // Primary drag start.
     if response.drag_started_by(PointerButton::Primary)
         && let Some(pos) = response.interact_pointer_pos()
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
     {
-        // The new state is the opposite of the current cell state
-        let old_state = app.sim.get(row, col);
-        app.drag_paint_state = Some(!old_state);
-        app.sim.toggle(row, col);
-        app.sim.pattern_name = None;
+        if shift_held {
+            // Begin rectangular selection; suppress normal paint.
+            app.selection_drag_start = Some((row, col));
+            app.selection = Some([row, col, row, col]);
+            app.drag_paint_state = None;
+            app.paste_anchor = None;
+        } else {
+            // Clear any existing selection and begin paint.
+            app.selection = None;
+            app.selection_drag_start = None;
+            let old_state = app.sim.get(row, col);
+            app.drag_paint_state = Some(!old_state);
+            app.sim.toggle(row, col);
+            app.sim.pattern_name = None;
+        }
     }
 
+    // Primary drag in progress.
     if response.dragged_by(PointerButton::Primary)
-        && let (Some(pos), Some(paint_alive)) =
-            (response.interact_pointer_pos(), app.drag_paint_state)
+        && let Some(pos) = response.interact_pointer_pos()
         && let Some((row, col)) = app.camera.pos_to_cell(pos, origin, w, h)
     {
-        app.sim.set(row, col, paint_alive);
-        app.sim.pattern_name = None;
+        if let Some((sr, sc)) = app.selection_drag_start {
+            // Extend selection rectangle.
+            app.selection = Some([sr.min(row), sc.min(col), sr.max(row), sc.max(col)]);
+        } else if let Some(paint_alive) = app.drag_paint_state {
+            app.sim.set(row, col, paint_alive);
+            app.sim.pattern_name = None;
+        }
     }
 
+    // Primary drag stopped.
     if response.drag_stopped_by(PointerButton::Primary) {
         app.drag_paint_state = None;
+        app.selection_drag_start = None;
     }
 
     // Middle-button pan: record start position.
@@ -202,5 +248,79 @@ fn paint_grid_lines(app: &GameOfLifeApp, painter: &Painter, origin: Pos2, viewpo
     for col in col_min..col_max {
         let x = origin.x + col as f32 * s;
         painter.line_segment([Pos2::new(x, y_start), Pos2::new(x, y_end)], stroke);
+    }
+}
+
+/// Draws a dashed rectangular border around `app.selection`, if any.
+///
+/// Each side is subdivided into alternating filled (`DASH_FILLED_PX`) and
+/// gap (`DASH_GAP_PX`) segments drawn with [`Painter::line_segment`].
+///
+/// # Arguments
+/// * `app`     — application state (read-only access to selection and camera)
+/// * `painter` — egui painter for the grid canvas
+/// * `origin`  — screen-space top-left corner of the grid canvas
+fn paint_selection_overlay(app: &GameOfLifeApp, painter: &Painter, origin: Pos2) {
+    let [rmin, cmin, rmax, cmax] = match app.selection {
+        Some(s) => s,
+        None => return,
+    };
+    let s = app.camera.cell_size;
+    let x0 = origin.x + cmin as f32 * s;
+    let y0 = origin.y + rmin as f32 * s;
+    let x1 = origin.x + (cmax + 1) as f32 * s;
+    let y1 = origin.y + (rmax + 1) as f32 * s;
+
+    let stroke = Stroke::new(1.5, COLOR_SELECTION);
+    paint_dashed_segment(painter, Pos2::new(x0, y0), Pos2::new(x1, y0), stroke);
+    paint_dashed_segment(painter, Pos2::new(x1, y0), Pos2::new(x1, y1), stroke);
+    paint_dashed_segment(painter, Pos2::new(x1, y1), Pos2::new(x0, y1), stroke);
+    paint_dashed_segment(painter, Pos2::new(x0, y1), Pos2::new(x0, y0), stroke);
+}
+
+/// Draws a dashed line from `a` to `b` using alternating filled/gap segments.
+fn paint_dashed_segment(painter: &Painter, a: Pos2, b: Pos2, stroke: Stroke) {
+    let total = (b - a).length();
+    if total < 1e-3 {
+        return;
+    }
+    let dir = (b - a) / total;
+    let period = DASH_FILLED_PX + DASH_GAP_PX;
+    let mut dist = 0.0f32;
+    while dist < total {
+        let dash_end = (dist + DASH_FILLED_PX).min(total);
+        painter.line_segment([a + dir * dist, a + dir * dash_end], stroke);
+        dist += period;
+    }
+}
+
+/// Draws ghost (semi-transparent) cells showing where the clipboard would be
+/// pasted at `app.paste_anchor`.
+///
+/// # Arguments
+/// * `app`     — application state (read-only access to clipboard, paste_anchor, camera)
+/// * `painter` — egui painter for the grid canvas
+/// * `origin`  — screen-space top-left corner of the grid canvas
+fn paint_ghost_cells(app: &GameOfLifeApp, painter: &Painter, origin: Pos2) {
+    let (anchor_row, anchor_col) = match app.paste_anchor {
+        Some(a) => a,
+        None => return,
+    };
+    if app.clipboard.is_empty() {
+        return;
+    }
+    let s = app.camera.cell_size;
+    let fill_size = if s > CELL_GAP_PX { s - CELL_GAP_PX } else { s };
+    let (w, h) = (app.sim.width(), app.sim.height());
+    for &(dr, dc) in &app.clipboard {
+        let r = anchor_row as i64 + dr;
+        let c = anchor_col as i64 + dc;
+        if r < 0 || c < 0 || r as usize >= h || c as usize >= w {
+            continue;
+        }
+        let x = origin.x + c as f32 * s;
+        let y = origin.y + r as f32 * s;
+        let rect = Rect::from_min_size(Pos2::new(x, y), Vec2::splat(fill_size));
+        painter.rect_filled(rect, 0.0, COLOR_GHOST);
     }
 }

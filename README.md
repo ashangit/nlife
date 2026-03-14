@@ -64,6 +64,13 @@ and rendered via wgpu on Wayland.
 - **Drag-and-drop** — drag a `.rle` or `.cells` file directly onto the window to load and
   centre it instantly; unsupported file types show a dismissible error message
 
+### Selection, copy & paste
+- **Rectangular selection** — hold `Shift` and drag to draw a selection rectangle over any region of the grid
+- **Copy** — `Ctrl+C` copies all live cells inside the current selection to the clipboard as relative offsets
+- **Paste** — `Ctrl+V` enters paste mode; ghost cells follow the cursor to preview placement; left-click to commit
+- **Delete** — `Delete` erases all live cells inside the selection and clears it
+- **Cancel** — `Escape` clears the selection and cancels any pending paste
+
 ### UI extras
 - **Keyboard cheat-sheet** — `F1` toggles an overlay listing all shortcuts
 - **Pattern name display** — the name of the currently loaded pattern (from the browser or a file) is shown in the top panel next to the generation counter; it is cleared when the grid is edited, cleared, or randomly filled
@@ -111,6 +118,11 @@ make release bump=major        # … major version
 | `0` | Reset zoom to 100 % |
 | `Ctrl+scroll` | Zoom in / out (mouse-anchored) |
 | `Middle-drag` | Pan viewport |
+| `Shift+drag` | Rectangular selection |
+| `Ctrl+C` | Copy selection |
+| `Ctrl+V` | Paste clipboard (click to place) |
+| `Delete` | Delete selection |
+| `Escape` | Clear selection / cancel paste |
 | `F1` | Show / hide keyboard cheat-sheet |
 
 ---
