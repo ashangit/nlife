@@ -193,6 +193,16 @@ impl Simulation {
         }
     }
 
+    /// Returns the bounding box of all live cells as `[row_min, col_min, row_max, col_max]`.
+    ///
+    /// Returns `None` when the grid has no live cells (empty grid).
+    pub(crate) fn live_bbox(&self) -> Option<[usize; 4]> {
+        match &self.engine {
+            Engine::Swar(g) => g.live_bbox,
+            Engine::HashLife(hl) => hl.live_bbox(),
+        }
+    }
+
     /// Returns `true` if the HashLife engine is currently active.
     pub(crate) fn is_hashlife(&self) -> bool {
         matches!(self.engine, Engine::HashLife(_))
@@ -562,6 +572,58 @@ mod tests {
             sim.population(),
             pop_before,
             "run_gc must not alter population"
+        );
+    }
+
+    // ── live_bbox proxy tests ─────────────────────────────────────────────────
+    //
+    // These tests reference `Simulation::live_bbox` which does not exist yet.
+    // They will fail to compile until the method is implemented.
+
+    /// A fresh SWAR simulation (default engine) with no live cells must return None.
+    #[test]
+    fn test_simulation_live_bbox_empty_swar() {
+        let sim = Simulation::new();
+        assert!(!sim.is_hashlife(), "precondition: default engine is SWAR");
+        assert_eq!(
+            sim.live_bbox(),
+            None,
+            "empty SWAR simulation must return None for live_bbox"
+        );
+    }
+
+    /// After loading cells into the SWAR engine, live_bbox must return Some.
+    #[test]
+    fn test_simulation_live_bbox_nonempty_swar() {
+        let mut sim = Simulation::new();
+        assert!(!sim.is_hashlife());
+        // Load a small L-shape pattern.
+        sim.load_cells(&[(0, 0), (1, 0), (1, 1)]);
+        let bbox = sim.live_bbox();
+        assert!(
+            bbox.is_some(),
+            "SWAR simulation with live cells must return Some for live_bbox"
+        );
+        // The bbox must be non-degenerate in at least one dimension.
+        let [row_min, col_min, row_max, col_max] = bbox.unwrap();
+        assert!(
+            row_max >= row_min && col_max >= col_min,
+            "live_bbox must have row_max >= row_min and col_max >= col_min; \
+             got [{row_min},{col_min},{row_max},{col_max}]"
+        );
+    }
+
+    /// A freshly created HashLife engine (after toggle) with no live cells must return None.
+    #[test]
+    fn test_simulation_live_bbox_empty_hashlife() {
+        let mut sim = Simulation::new();
+        sim.toggle_engine(); // SWAR → HashLife
+        sim.clear(); // ensure grid is empty
+        assert!(sim.is_hashlife(), "precondition: engine is HashLife");
+        assert_eq!(
+            sim.live_bbox(),
+            None,
+            "empty HashLife simulation must return None for live_bbox"
         );
     }
 
