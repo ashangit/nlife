@@ -681,6 +681,61 @@ impl HashLife {
         self.store.nodes.lock().unwrap()[self.root as usize].pop
     }
 
+    /// Returns the bounding box of all live cells as `[row_min, col_min, row_max, col_max]`.
+    ///
+    /// Returns `None` if the grid is empty.  The coordinates are absolute
+    /// (same space as [`get`](HashLife::get) / [`set`](HashLife::set)).
+    pub(crate) fn live_bbox(&self) -> Option<[usize; 4]> {
+        if self.population() == 0 {
+            return None;
+        }
+        let size = self.width();
+        let mut acc: Option<[usize; 4]> = None;
+        self.bbox_recursive(self.root, 0, 0, size, &mut acc);
+        acc
+    }
+
+    /// Recursive helper for [`live_bbox`](HashLife::live_bbox).
+    ///
+    /// Traverses the quadtree pruning dead (pop == 0) branches and accumulates
+    /// the axis-aligned bounding box of all live leaves.
+    fn bbox_recursive(
+        &self,
+        node: NodeId,
+        node_row: usize,
+        node_col: usize,
+        node_size: usize,
+        acc: &mut Option<[usize; 4]>,
+    ) {
+        let (pop, nw, ne, sw, se) = {
+            let nodes = self.store.nodes.lock().unwrap();
+            let n = &nodes[node as usize];
+            if n.pop == 0 {
+                return;
+            }
+            if node_size == 1 {
+                // Live leaf — expand bbox.
+                *acc = Some(match *acc {
+                    None => [node_row, node_col, node_row, node_col],
+                    Some([rmin, cmin, rmax, cmax]) => [
+                        rmin.min(node_row),
+                        cmin.min(node_col),
+                        rmax.max(node_row),
+                        cmax.max(node_col),
+                    ],
+                });
+                return;
+            }
+            (n.pop, n.nw, n.ne, n.sw, n.se)
+        };
+        let _ = pop; // used only for the pop == 0 early-return above
+        let half = node_size / 2;
+        self.bbox_recursive(nw, node_row, node_col, half, acc);
+        self.bbox_recursive(ne, node_row, node_col + half, half, acc);
+        self.bbox_recursive(sw, node_row + half, node_col, half, acc);
+        self.bbox_recursive(se, node_row + half, node_col + half, half, acc);
+    }
+
     /// Sets the log₂ of the step size and clears the step cache if it changed.
     ///
     /// The value is clamped to 62 to avoid shifting past `u64` range.
@@ -2368,6 +2423,90 @@ mod tests {
         // Also verify a miss is consistent.
         assert_eq!(table.get_scalar(n, n, n, n), None);
         assert_eq!(table.get(n, n, n, n), None);
+    }
+
+    // ── live_bbox tests ───────────────────────────────────────────────────────
+    //
+    // These tests reference `HashLife::live_bbox` which does not exist yet.
+    // They will fail to compile until the method is implemented.
+
+    /// A fresh HashLife with no live cells returns None.
+    #[test]
+    fn test_live_bbox_empty_returns_none() {
+        let hl = HashLife::new();
+        assert_eq!(hl.live_bbox(), None, "empty grid must return None");
+    }
+
+    /// A single live cell produces a 1×1 bbox equal to its own coordinates.
+    #[test]
+    fn test_live_bbox_single_cell() {
+        let mut hl = HashLife::new();
+        let r = 10usize;
+        let c = 20usize;
+        hl.set(r, c, true);
+        assert_eq!(
+            hl.live_bbox(),
+            Some([r, c, r, c]),
+            "single live cell at ({r},{c}) must give bbox [{r},{c},{r},{c}]"
+        );
+    }
+
+    /// A horizontal blinker (1 row × 3 cols) must produce a bbox spanning
+    /// exactly that row and those three columns.
+    #[test]
+    fn test_live_bbox_horizontal_blinker() {
+        let mut hl = HashLife::new();
+        let half = hl.width() / 2;
+        let row = half;
+        hl.set(row, half - 1, true);
+        hl.set(row, half, true);
+        hl.set(row, half + 1, true);
+        assert_eq!(
+            hl.live_bbox(),
+            Some([row, half - 1, row, half + 1]),
+            "horizontal blinker must give single-row bbox spanning 3 cols"
+        );
+    }
+
+    /// live_bbox must agree with the bounding box derived from live_cells_offsets.
+    #[test]
+    fn test_live_bbox_matches_collected_cells() {
+        // Load a glider.
+        let mut hl = HashLife::new();
+        hl.set_cells(&[(0, 1), (1, 2), (2, 0), (2, 1), (2, 2)]);
+
+        // Derive bbox from live cells directly.
+        let cells = hl.live_cells_offsets();
+        assert!(!cells.is_empty());
+        let half = (hl.width() / 2) as i32;
+        let abs_cells: Vec<(usize, usize)> = cells
+            .iter()
+            .map(|&(dr, dc)| ((half + dr) as usize, (half + dc) as usize))
+            .collect();
+        let row_min = abs_cells.iter().map(|&(r, _)| r).min().unwrap();
+        let col_min = abs_cells.iter().map(|&(_, c)| c).min().unwrap();
+        let row_max = abs_cells.iter().map(|&(r, _)| r).max().unwrap();
+        let col_max = abs_cells.iter().map(|&(_, c)| c).max().unwrap();
+
+        assert_eq!(
+            hl.live_bbox(),
+            Some([row_min, col_min, row_max, col_max]),
+            "live_bbox must match bbox derived from live_cells_offsets"
+        );
+    }
+
+    /// After clear(), live_bbox must return None.
+    #[test]
+    fn test_live_bbox_after_clear_returns_none() {
+        let mut hl = HashLife::new();
+        hl.set_cells(&[(0, 0), (0, 1), (1, 0)]);
+        assert!(hl.live_bbox().is_some(), "precondition: grid is non-empty");
+        hl.clear();
+        assert_eq!(
+            hl.live_bbox(),
+            None,
+            "after clear live_bbox must return None"
+        );
     }
 
     /// When the universe level exceeds PARALLEL_THRESHOLD, HashLife and SWAR

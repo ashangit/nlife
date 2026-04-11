@@ -36,6 +36,7 @@ and rendered via wgpu on Wayland.
 ### Zoom & navigation
 - **Smooth zoom** — `+` / `=` / `-` keys and the ＋/− toolbar buttons animate the zoom
   level; `0` resets to 100 %
+- **Fit to live cells** — `F` pans and zooms so all live cells fill the viewport; no-op on an empty grid
 - **Mouse-anchored zoom** — `Ctrl+scroll` or pinch zooms towards the cursor
 - **Middle-drag pan** — hold and drag the middle mouse button to pan the viewport
 
@@ -116,6 +117,7 @@ make release bump=major        # … major version
 | `+` / `=` | Zoom in |
 | `-` | Zoom out |
 | `0` | Reset zoom to 100 % |
+| `F` | Fit all live cells in viewport |
 | `Ctrl+scroll` | Zoom in / out (mouse-anchored) |
 | `Middle-drag` | Pan viewport |
 | `Shift+drag` | Rectangular selection |

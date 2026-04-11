@@ -20,6 +20,7 @@ const SHORTCUTS: &[(&str, &str)] = &[
     ("= / +", "Zoom in"),
     ("-", "Zoom out"),
     ("0", "Reset zoom to 100 %"),
+    ("F", "Fit live cells in viewport"),
     ("F1", "Show / hide this cheat-sheet"),
     ("Ctrl+scroll", "Zoom in / out"),
     ("Middle-drag", "Pan viewport"),

@@ -28,6 +28,7 @@ pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
         zoom_in,
         zoom_out,
         zoom_reset,
+        zoom_fit,
         copy,
         paste,
         delete,
@@ -42,6 +43,7 @@ pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
             i.key_pressed(Key::Equals) || i.key_pressed(Key::Plus),
             i.key_pressed(Key::Minus),
             i.key_pressed(Key::Num0),
+            i.key_pressed(Key::F),
             i.key_pressed(Key::C) && i.modifiers.ctrl,
             i.key_pressed(Key::V) && i.modifiers.ctrl,
             i.key_pressed(Key::Delete),
@@ -90,6 +92,9 @@ pub(crate) fn handle_keyboard(app: &mut GameOfLifeApp, ctx: &egui::Context) {
         // Factor needed to reach DEFAULT_CELL_SIZE from the current target.
         app.camera
             .set_zoom_target(DEFAULT_CELL_SIZE / app.camera.target_cell_size(), center);
+    }
+    if zoom_fit && let Some(bbox) = app.sim.live_bbox() {
+        app.camera.zoom_to_fit(bbox);
     }
 }
 
