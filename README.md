@@ -90,8 +90,8 @@ and rendered via wgpu on Wayland.
 
 ```bash
 cargo run                      # debug build + launch
-cargo build --release          # optimised binary → target/release/newlife
-./target/release/newlife       # run the release binary
+cargo build --release          # optimised binary → target/release/nlife
+./target/release/nlife       # run the release binary
 
 cargo test                     # run all tests
 cargo test test_blinker        # run a specific test by name prefix
@@ -131,7 +131,7 @@ make release bump=major        # … major version
 
 ## Architecture
 
-`newlife` is built with **egui 0.33 / eframe 0.33** (wgpu renderer, Wayland).
+`nlife` is built with **egui 0.33 / eframe 0.33** (wgpu renderer, Wayland).
 The codebase separates a pure simulation core (no UI dependency) from an egui frontend.
 
 ### Module map
